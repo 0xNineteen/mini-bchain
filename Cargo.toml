@@ -5,4 +5,13 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+path = "src/lib.rs"
+name = "main"
+
 [dependencies]
+borsh = "0.10.2"
+ed25519-dalek = "1.0.1"
+rand = "0.7.0"
+rocksdb = "0.20.1"
+sha2 = "0.10.6"
