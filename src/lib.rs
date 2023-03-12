@@ -6,7 +6,7 @@ use std::vec;
 use rocksdb::DB;
 use sha2::{Sha256, Digest};
 use borsh::{BorshSerialize, BorshDeserialize};
-use ed25519_dalek::{Keypair, Signature, PublicKey};
+use ed25519_dalek::{Keypair, Signature, PublicKey, SignatureError};
 use ed25519_dalek::{Signer, Verifier};
 use rand::rngs::OsRng;
 use anyhow::Result;
@@ -53,12 +53,12 @@ impl Transaction {
 }
 
 impl SignedTransaction { 
-    pub fn verify(&self) -> bool { 
+    pub fn verify(&self) -> Result<(), SignatureError> { 
         let digest = self.transaction.digest();
         // todo: remove these unwrap()s and return a result<>
-        let publickey = PublicKey::from_bytes(self.transaction.address.as_slice()).unwrap();
-        let sig = Signature::from_bytes(self.signature.unwrap().as_slice()).unwrap();
-        publickey.verify(digest.as_slice(), &sig).is_ok()
+        let publickey = PublicKey::from_bytes(self.transaction.address.as_slice())?;
+        let sig = Signature::from_bytes(self.signature.unwrap().as_slice())?;
+        publickey.verify(digest.as_slice(), &sig)
     }
 }
 
@@ -268,7 +268,7 @@ pub async fn network(
     }
 }
 
-
+// to build this out first
 pub async fn block_producer(
     mut p2p_tx_reciever: UnboundedReceiver<SignedTransaction>,
     fork_choice: Arc<Mutex<ForkChoice>>, 
@@ -293,7 +293,12 @@ pub async fn block_producer(
         // add new txs to memepool
         while let Ok(tx) = p2p_tx_reciever.try_recv() {
             // do some verification here 
-            mempool.push(tx);
+            info!("new tx: {tx:?}");
+            if tx.verify().is_ok() { 
+                info!("tx verification passed");
+                mempool.push(tx);
+                info!("new mempool length: {}", mempool.len());
+            }
         } 
     }
 }
@@ -541,7 +546,7 @@ mod tests {
         };
         let transaction = transaction.sign(&keypair);
 
-        assert!(transaction.verify())
+        assert!(transaction.verify().is_ok())
     }
 
     #[test]
