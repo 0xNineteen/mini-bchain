@@ -15,7 +15,7 @@ use std::time::Duration;
 use tracing_subscriber;
 use tracing::{info};
 
-use mini_bchain::{Transaction, BlockHeader};
+use mini_bchain::{Transaction, Block};
 
 
 #[derive(NetworkBehaviour)]
@@ -34,7 +34,7 @@ const GOSSIP_CORE_TOPICS: [&str; 2] = [
 #[derive(BorshSerialize, BorshDeserialize, Debug)]
 enum Broadcast { 
     Transaction(Transaction), 
-    BlockHeader(BlockHeader)
+    Block(Block)
 }
 
 #[tokio::main]

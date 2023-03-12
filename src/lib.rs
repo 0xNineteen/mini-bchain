@@ -1,10 +1,16 @@
+use std::collections::HashMap;
 use std::error::Error;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::vec;
 use rocksdb::DB;
 use sha2::{Sha256, Digest};
 use borsh::{BorshSerialize, BorshDeserialize};
 use ed25519_dalek::{Keypair, Signature, PublicKey};
 use ed25519_dalek::{Signer, Verifier};
 use rand::rngs::OsRng;
+use anyhow::Result;
+use anyhow::anyhow;
 
 pub const HASH_BYTE_SIZE: usize = 32;
 pub type Sha256Bytes = [u8; HASH_BYTE_SIZE];
@@ -80,6 +86,14 @@ pub struct Block {
     pub txs: Transactions
 }
 
+impl Block { 
+    pub fn genesis() -> Self { 
+        let header = BlockHeader::genesis(); 
+        let txs = Transactions(vec![]);
+        Block { header, txs }
+    }
+}
+
 impl BlockHeader { 
     pub fn genesis() -> Self { 
         let mut block = BlockHeader { state_root: [0; HASH_BYTE_SIZE], tx_root: [0; HASH_BYTE_SIZE], parent_hash: [0; HASH_BYTE_SIZE],  block_hash: None, nonce: 0};
@@ -129,7 +143,273 @@ impl Transactions {
     }
 }
 
-pub fn main() { }
+// client continuously sends txs 
+// p2p collects transactions
+
+use libp2p::futures::StreamExt;
+use libp2p::gossipsub::{Sha256Topic};
+use libp2p::{
+    gossipsub, identity, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
+};
+use tokio::runtime::Builder;
+use tokio::select;
+use tokio::sync::{RwLock, Mutex};
+use tokio::sync::mpsc::channel;
+use tokio::time::interval;
+use std::time::Duration;
+use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
+
+use tracing_subscriber;
+use tracing::{info, Instrument};
+
+#[derive(NetworkBehaviour)]
+struct ChainBehaviour {
+    gossipsub: gossipsub::Behaviour,
+    mdns: mdns::async_io::Behaviour,
+}
+
+const TRANSACTION_TOPIC: &str = "transactions";
+const BLOCK_TOPIC: &str = "blocks";
+const GOSSIP_CORE_TOPICS: [&str; 2] = [
+    TRANSACTION_TOPIC, 
+    BLOCK_TOPIC 
+];
+
+#[derive(BorshSerialize, BorshDeserialize, Debug)]
+enum Broadcast { 
+    Transaction(SignedTransaction), 
+    Block(Block)
+}
+
+pub async fn network(
+    p2p_tx_sender: UnboundedSender<SignedTransaction>,
+    p2p_block_sender: UnboundedSender<Block>
+) { 
+    // Create a random PeerId
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(local_key.public());
+    info!("Local peer id: {local_peer_id}");
+
+    let mut gossipsub = gossipsub::Behaviour::new( 
+        gossipsub::MessageAuthenticity::Signed(local_key.clone()),
+        gossipsub::Config::default()
+    ).unwrap();
+
+    for topic in GOSSIP_CORE_TOPICS { 
+        let topic = Sha256Topic::new(topic);
+        gossipsub.subscribe(&topic).unwrap();
+    }
+
+    let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id).unwrap();
+    let behaviour = ChainBehaviour { 
+        gossipsub, 
+        mdns
+    };
+
+    // Set up an encrypted DNS-enabled TCP Transport over the Mplex protocol.
+    let transport = libp2p::development_transport(local_key.clone()).await.unwrap();
+    let mut swarm = Swarm::with_threadpool_executor(transport, behaviour, local_peer_id);
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
+    let mut tick = interval(Duration::from_secs(4));
+
+    loop {
+        select! {
+            _ = tick.tick() => { 
+                info!("publishing...");
+
+                let mut rng = OsRng{};
+                let keypair = Keypair::generate(&mut rng);
+                let transaction = Transaction { 
+                    address: [0; 32], 
+                    amount: 420
+                };
+                let transaction = transaction.sign(&keypair);
+                let transaction = Broadcast::Transaction(transaction);
+                let bytes = transaction.try_to_vec().unwrap();
+
+                let result = swarm.behaviour_mut()
+                    .gossipsub
+                    .publish(Sha256Topic::new(TRANSACTION_TOPIC), bytes);
+
+                if let Err(e) = result { 
+                    info!("err: {e:?}");
+                }
+            }
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::Behaviour(ChainBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                    for (peer_id, _multiaddr) in list {
+                        info!("mDNS discovered a new peer: {peer_id}");
+                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                    }
+                },
+                SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(gossipsub::Event::Message { 
+                    message,
+                    ..
+                 })) => { 
+                    // todo: can send without this await? 
+                    // txs need to go to the POW thread 
+                    // blocks need to go to the fork choice thread
+                    // data_sender.send(message.data).unwrap();
+                    let event = Broadcast::try_from_slice(message.data.as_slice()).unwrap();
+                    match event { 
+                        Broadcast::Transaction(tx) => {
+                            // send to mempool
+                            p2p_tx_sender.send(tx).unwrap();
+                        },
+                        Broadcast::Block(block) => {
+                            // send to block manager
+                            p2p_block_sender.send(block).unwrap();
+                        }
+                    } 
+                }
+                _ => { }
+            }
+        }
+    }
+}
+
+
+pub async fn block_producer(
+    mut p2p_tx_reciever: UnboundedReceiver<SignedTransaction>,
+    fork_choice: Arc<Mutex<ForkChoice>>, 
+    db: Arc<DB>,
+) { 
+    let mut mempool = vec![];
+    let mut current_head = fork_choice.blocking_lock().get_head().unwrap();
+    
+    loop { 
+        // sample N txs from mempool
+        // compute state transitions 
+        // build new block 
+        // do pow for a few rounds
+        // if success => { insert in DB + send to p2p to broadcast } 
+
+        // check for new head every once in a while
+        let head = fork_choice.blocking_lock().get_head().unwrap();
+        if head != current_head {
+            current_head = head;
+        }
+
+        // add new txs to memepool
+        while let Ok(tx) = p2p_tx_reciever.try_recv() {
+            // do some verification here 
+            mempool.push(tx);
+        } 
+    }
+}
+
+use std::collections::BinaryHeap; 
+
+pub struct ForkChoice {  
+    block_heights: HashMap<Sha256Bytes, u32>, 
+    // sorted so we know it will be consistent across nodes
+    heads: BinaryHeap<Sha256Bytes>, 
+    head_height: u32
+}
+
+impl ForkChoice { 
+    pub fn new(block_hash: Sha256Bytes) -> Self { 
+        let mut block_heights = HashMap::new(); 
+        let mut heads = BinaryHeap::new();
+        let head_height = 0;
+
+        block_heights.insert(block_hash, 0);
+        heads.push(block_hash);
+
+        ForkChoice { block_heights, heads, head_height }
+    }
+
+    pub fn insert(&mut self, block_hash: Sha256Bytes, parent_hash: Sha256Bytes) -> Result<()> { 
+        let parent_height = self.block_heights.get(&parent_hash);
+        if parent_height.is_none() { 
+            return Err(anyhow!("parent block hash DNE in fork choice"));
+        }
+        let parent_height = parent_height.unwrap();
+        let block_height = parent_height + 1; 
+
+        if block_height > self.head_height { 
+            // new head
+            self.heads.clear(); 
+            self.head_height = block_height;
+            self.heads.push(block_hash);
+
+        } else if block_height == self.head_height { 
+            // another tie
+            self.heads.push(block_hash);
+
+        }
+        self.block_heights.insert(block_hash, block_height);
+
+        Ok(())
+    }
+
+    pub fn get_head(&self) -> Option<Sha256Bytes> { 
+        self.heads.peek().cloned()
+    }
+}
+
+pub async fn block_manager(
+    mut p2p_block_reciever: UnboundedReceiver<Block>,
+    fork_choice: Arc<Mutex<ForkChoice>>, 
+    db: Arc<DB>,
+) -> Result<()> { 
+    // keeps track of existing blocks + new blocks
+    loop { 
+        tokio::select! {
+            Some(block) = p2p_block_reciever.recv() => { 
+                let block_hash = block.header.block_hash.unwrap(); 
+                let parent_hash = block.header.parent_hash; 
+
+                // TODO: do some validation here 
+
+                // TODO: handle when parent hash not found (ie, request parent from reciever)
+                fork_choice.blocking_lock().insert(block_hash, parent_hash).unwrap();
+                db.as_ref().put(block_hash, block.try_to_vec()?)?;
+            }, 
+        }
+    }
+}
+
+pub fn main() -> Result<()> { 
+    tracing_subscriber::fmt::init();
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+
+    // init db 
+    let path = "../db/";
+    let db = DB::open_default(path).unwrap();
+    // we need shared access to the db 
+    let db = Arc::new(db);
+
+    runtime.block_on(async move { 
+        let (p2p_tx_sender, p2p_tx_reciever) = unbounded_channel();
+        let (p2p_block_sender, p2p_block_reciever) = unbounded_channel();
+
+        tokio::spawn(network(p2p_tx_sender, p2p_block_sender)
+            .instrument(tracing::info_span!("network")));
+
+        // init genesis
+        let genesis = Block::genesis();
+        let genesis_hash = genesis.header.block_hash.unwrap();
+        let fork_choice = ForkChoice::new(genesis_hash);
+        let fork_choice = Arc::new(Mutex::new(fork_choice));
+
+        db.as_ref().put(genesis_hash, genesis.try_to_vec().unwrap()).unwrap();
+
+        tokio::spawn(block_producer(p2p_tx_reciever, fork_choice.clone(), db.clone())
+            .instrument(tracing::info_span!("block producer"))
+        );
+
+        tokio::spawn(async move { 
+            block_manager(p2p_block_reciever, fork_choice.clone(), db.clone())
+                .instrument(tracing::info_span!("block manager"))
+                .await.unwrap()
+        });
+
+        loop { }
+    });
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -141,30 +421,35 @@ mod tests {
 
     #[test]
     fn fork_choice() { 
-        let mut block_heights = HashMap::new(); 
-        let mut heads = vec![];
-        let mut head_height = 0;
-
         let block = BlockHeader::genesis(); 
-        block_heights.insert(block.block_hash.unwrap(), 0);
-        heads.push(block.block_hash.unwrap());
+        let mut fork_choice = ForkChoice::new(block.block_hash.unwrap()); 
+
+        assert!(fork_choice.get_head().unwrap() == block.block_hash.unwrap());
 
         // new block 
-        { 
-            let mut block_a = BlockHeader::default(); 
-            block_a.parent_hash = block.block_hash.unwrap();
-            block_a.commit_block_hash();
+        let mut block_a = BlockHeader::default(); 
+        block_a.parent_hash = block.block_hash.unwrap();
+        block_a.commit_block_hash();
 
-            let parent_height = *block_heights.get(&block_a.parent_hash).unwrap();
+        fork_choice.insert(
+            block_a.block_hash.unwrap(), 
+            block_a.parent_hash
+        ).unwrap();
 
-            if parent_height + 1 > head_height { 
-                heads = vec![block_a.block_hash.unwrap()];
-                head_height = parent_height + 1;
-            } else if parent_height + 1 == head_height { 
-                heads.push(block.block_hash.unwrap());
-            }
-            block_heights.insert(block_a.block_hash.unwrap(), parent_height + 1);
-        }
+        assert!(fork_choice.get_head().unwrap() == block_a.block_hash.unwrap());
+
+        // fork 
+        let mut block_b = BlockHeader::default(); 
+        block_b.parent_hash = block.block_hash.unwrap();
+        block_b.commit_block_hash();
+
+        fork_choice.insert(
+            block_b.block_hash.unwrap(), 
+            block_b.parent_hash
+        ).unwrap();
+
+        // make sure it doesnt break on forks
+        let fork = fork_choice.get_head().unwrap();
     }
 
     #[test]
