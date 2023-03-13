@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::{vec, mem};
 use ed25519_dalek::ed25519::signature::rand_core::block;
+use libp2p::quic::Connecting;
 use rand::Rng;
 use rocksdb::DB;
 use sha2::digest::generic_array::functional::FunctionalSequence;
@@ -108,7 +109,7 @@ impl BlockHeader {
         self.block_hash = Some(self.compute_block_hash());
     }
 
-    pub fn compute_block_hash(&mut self) -> Sha256Bytes { 
+    pub fn compute_block_hash(&self) -> Sha256Bytes { 
         let mut hasher = Sha256::new();
         hasher.update(self.state_root);
         hasher.update(self.parent_hash);
@@ -116,6 +117,19 @@ impl BlockHeader {
 
         let bytes: Sha256Bytes = hasher.finalize().as_slice().try_into().unwrap();
         bytes
+    }
+
+    pub fn is_valid_pow(&self) -> bool { 
+        let hash = self.compute_block_hash();
+        let n_zeros = POW_LEN_ZEROS.min(HASH_BYTE_SIZE);
+        let mut pow_success = true;
+        for i in 0..n_zeros { 
+            if hash[i] != 0 { 
+                pow_success = false;
+                break;
+            }
+        }
+        pow_success
     }
 }
 
@@ -279,12 +293,36 @@ pub async fn network(
                             let block_hash = block.header.block_hash.unwrap(); 
                             let parent_hash = block.header.parent_hash; 
             
-                            // TODO: do some validation here 
+                            let head_block = Block::try_from_slice(
+                                db.get(parent_hash)?.unwrap().as_slice()
+                            )?;
+                            let txs = &block.txs.0;
 
                             // re-produce the state change 
+                            let (
+                                mut block_header, 
+                                account_digests, 
+                                local_db
+                            ) = state_transition(head_block, txs, db.clone())?;
+                            block_header.nonce = block.header.nonce; 
+                            block_header.commit_block_hash();
+
+                            // verify final block
+                            let verification = { 
+                                block_header.block_hash == block.header.block_hash && 
+                                block_header.state_root == block.header.state_root && 
+                                block_header.tx_root == block.header.tx_root && 
+                                block_header.is_valid_pow()
+                            };
+                            if !verification { 
+                                info!("block verification failed...");
+                                continue;
+                            }
+                            info!("block verification passed...");
+
                             // store new block's state
+                            commit_new_block(&block, account_digests, local_db, fork_choice.clone(), db.clone()).await?;
             
-                            // TODO: handle when parent hash not found (ie, request parent from reciever)
                             fork_choice.lock().await.insert(block_hash, parent_hash).unwrap();
                             db.as_ref().put(block_hash, block.try_to_vec()?)?;
                         }, 
@@ -296,9 +334,104 @@ pub async fn network(
     }
 }
 
-const TXS_PER_BLOCK: usize = 1;
+const TXS_PER_BLOCK: usize = 5;
 const POW_N_ZEROS: usize = 3; // note: needs to be > 0
 const POW_LEN_ZEROS: usize = POW_N_ZEROS - 1;
+
+pub fn state_transition(
+    head_block: Block,
+    txs: &[SignedTransaction], 
+    db: Arc<DB>, 
+) -> Result<(BlockHeader, AccountDigests, HashMap<Sha256Bytes, Vec<u8>>)> { 
+
+    let state_root = head_block.header.state_root;
+    let mut account_digests = AccountDigests::try_from_slice(
+        db.get(state_root)?.unwrap().as_slice()
+    )?.0;
+
+    // build new block 
+    info!("building new block state...");
+    let mut local_db = HashMap::new();
+
+    for tx in txs { 
+        let tx = &tx.transaction; 
+        let pubkey = tx.address;
+        let result = account_digests.iter().position(|(_, addr)| *addr == pubkey);
+        
+        let new_account = match result { 
+            Some(index) => { 
+                let (account_digest, _) = account_digests[index];
+                // look up existing account
+                let mut account = Account::try_from_slice(
+                    db.get(account_digest)?.unwrap().as_slice()
+                )?;
+                assert!(account.address == pubkey);
+                // process the tx 
+                account.amount = tx.amount;
+                // update digest list
+                account_digests.remove(index);
+                account
+            }, 
+            None => { 
+                let account = Account { 
+                    address: pubkey, 
+                    amount: tx.amount
+                };
+                account
+            }
+        };
+
+        let digest = new_account.digest();
+        let account_bytes = new_account.try_to_vec()?;
+
+        local_db.insert(digest, account_bytes);
+        account_digests.push((digest, pubkey));
+    }
+
+    let txs = txs.to_vec();
+    let txs = Transactions(txs);
+    let tx_root = txs.digest();
+
+    let account_digests = AccountDigests(account_digests);
+    let state_root = account_digests.digest();
+
+    let block_header = BlockHeader { 
+        parent_hash: head_block.header.block_hash.unwrap(), 
+        state_root, 
+        tx_root, 
+        block_hash: None, 
+        nonce: 1
+    };
+    
+    Ok((block_header, account_digests, local_db))
+}
+
+pub async fn commit_new_block(
+    block: &Block, 
+    account_digests: AccountDigests,
+    local_db: HashMap<Sha256Bytes, Vec<u8>>,
+    fork_choice: Arc<Mutex<ForkChoice>>, 
+    db: Arc<DB>
+) -> Result<()> { 
+    // * block_digest => block
+    db.put(block.header.block_hash.unwrap(), block.try_to_vec()?)?;
+
+    // * block.state_root => vec[digest]
+    db.put(block.header.state_root, account_digests.try_to_vec()?)?;
+
+    // * new accounts: digest => account
+    for (k, v) in local_db { 
+        db.put(k, v)?;
+    }
+
+    // TODO: handle when parent hash not found (ie, request parent from reciever)
+    let block_hash = block.header.block_hash.unwrap(); 
+    let parent_hash = block.header.parent_hash; 
+    fork_choice.lock().await.insert(block_hash, parent_hash).unwrap();
+    db.as_ref().put(block_hash, block.try_to_vec()?)?;
+
+    Ok(())
+}
 
 pub async fn block_producer(
     mut p2p_tx_reciever: UnboundedReceiver<SignedTransaction>,
@@ -335,85 +468,23 @@ pub async fn block_producer(
         let txs = &mempool[..TXS_PER_BLOCK];
 
         // compute state transitions 
+        
         // TODO: change to get pinned to reduce memory copy of reading values
         let head_block = Block::try_from_slice(
             db.get(current_head)?.unwrap().as_slice()
         )?;
-        let state_root = head_block.header.state_root;
-        let mut account_digests = AccountDigests::try_from_slice(
-            db.get(state_root)?.unwrap().as_slice()
-        )?.0;
-
-        // build new block 
-        info!("building new block state...");
-        let mut local_db = HashMap::new();
-
-        for tx in txs { 
-            let tx = &tx.transaction; 
-            let pubkey = tx.address;
-            let result = account_digests.iter().position(|(_, addr)| *addr == pubkey);
-            
-            let new_account = match result { 
-                Some(index) => { 
-                    let (account_digest, _) = account_digests[index];
-                    // look up existing account
-                    let mut account = Account::try_from_slice(
-                        db.get(account_digest)?.unwrap().as_slice()
-                    )?;
-                    assert!(account.address == pubkey);
-                    // process the tx 
-                    account.amount = tx.amount;
-                    // update digest list
-                    account_digests.remove(index);
-                    account
-                }, 
-                None => { 
-                    let account = Account { 
-                        address: pubkey, 
-                        amount: tx.amount
-                    };
-                    account
-                }
-            };
-
-            let digest = new_account.digest();
-            let account_bytes = new_account.try_to_vec()?;
-
-            local_db.insert(digest, account_bytes);
-            account_digests.push((digest, pubkey));
-        }
-
-        let txs = txs.to_vec();
-        let txs = Transactions(txs);
-        let tx_root = txs.digest();
-
-        let account_digests = AccountDigests(account_digests);
-        let state_root = account_digests.digest();
-
-        let mut block_header = BlockHeader { 
-            parent_hash: head_block.header.block_hash.unwrap(), 
-            state_root, 
-            tx_root, 
-            block_hash: None, 
-            nonce: 1
-        };
+        let (
+            mut block_header, 
+            account_digests, 
+            local_db
+        ) = state_transition(head_block, txs, db.clone())?;
 
         pub fn pow_loop(block_header: &mut BlockHeader, n_loops: usize) -> bool { 
             for _ in 0..n_loops { 
-                let hash = block_header.compute_block_hash();
-                let n_zeros = POW_LEN_ZEROS.min(HASH_BYTE_SIZE);
-                let mut pow_success = true;
-                for i in 0..n_zeros { 
-                    if hash[i] != 0 { 
-                        pow_success = false;
-                        break;
-                    }
-                }
-                if pow_success { 
+                if block_header.is_valid_pow() { 
+                    block_header.commit_block_hash(); // save it
                     return true;
                 }
-
-                // increment nonce 
                 block_header.nonce += 1;
             }
             false
@@ -426,39 +497,24 @@ pub async fn block_producer(
             // do pow for a few rounds
             let result = pow_loop(&mut block_header, 10);
             if result { 
-                // remove blocked txs from mempool 
-                for i in 0..TXS_PER_BLOCK { 
-                    mempool.remove(i);
-                }
-
-                // insert local state
-                // insert block into db 
-                block_header.commit_block_hash();
                 info!("new POW block produced: {:x?}", block_header.block_hash);
+
+                // remove blocked txs from mempool 
+                let txs = Transactions(txs.to_vec());
+                for _ in 0..TXS_PER_BLOCK { 
+                    mempool.remove(0);
+                }
 
                 let block = Block { 
                     header: block_header, 
                     txs
                 };
-                // * block_digest => block
-                db.put(block.header.block_hash.unwrap(), block.try_to_vec()?)?;
-
-                // * block.state_root => vec[digest]
-                db.put(state_root, account_digests.try_to_vec()?)?;
-
-                // * new accounts: digest => account
-                for (k, v) in local_db { 
-                    db.put(k, v)?;
-                }
-
-                // send block to p2p + block manager
                 p2p_block_sender.send(block.clone())?;
 
-                let block_hash = block.header.block_hash.unwrap(); 
-                let parent_hash = block.header.parent_hash; 
-                fork_choice.lock().await.insert(block_hash, parent_hash).unwrap();
-                db.as_ref().put(block_hash, block.try_to_vec()?)?;
+                // update state
+                commit_new_block(&block, account_digests, local_db, fork_choice.clone(), db.clone()).await?;
 
+                // update head
                 let head = fork_choice.lock().await.get_head().unwrap();
                 assert!(head != current_head);
                 break; // need this break to satisify borrow checker
@@ -509,6 +565,7 @@ impl ForkChoice {
             self.heads.clear(); 
             self.head_height = block_height;
             self.heads.push(block_hash);
+            info!("new head length: {block_height}!");
 
         } else if block_height == self.head_height { 
             // another tie
