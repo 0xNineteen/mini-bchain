@@ -2,8 +2,11 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::vec;
+use std::{vec, mem};
+use ed25519_dalek::ed25519::signature::rand_core::block;
+use rand::Rng;
 use rocksdb::DB;
+use sha2::digest::generic_array::functional::FunctionalSequence;
 use sha2::{Sha256, Digest};
 use borsh::{BorshSerialize, BorshDeserialize};
 use ed25519_dalek::{Keypair, Signature, PublicKey, SignatureError};
@@ -71,7 +74,7 @@ impl Account {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Debug, Default)]
+#[derive(BorshDeserialize, BorshSerialize, Debug, Default, Clone)]
 pub struct BlockHeader { 
     pub parent_hash: Sha256Bytes,
     pub state_root: Sha256Bytes, 
@@ -80,7 +83,7 @@ pub struct BlockHeader {
     pub nonce: u128
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
 pub struct Block { 
     pub header: BlockHeader, 
     pub txs: Transactions
@@ -130,8 +133,8 @@ impl AccountDigests {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
-pub struct Transactions(Vec<Transaction>);
+#[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
+pub struct Transactions(Vec<SignedTransaction>);
 
 impl Transactions { 
     pub fn digest(&self) -> Sha256Bytes { 
@@ -154,8 +157,9 @@ use libp2p::{
 use tokio::runtime::Builder;
 use tokio::select;
 use tokio::sync::{RwLock, Mutex};
+// use std::sync::Mutex;
 use tokio::sync::mpsc::channel;
-use tokio::time::interval;
+use tokio::time::{interval, sleep};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
 
@@ -183,8 +187,10 @@ enum Broadcast {
 
 pub async fn network(
     p2p_tx_sender: UnboundedSender<SignedTransaction>,
-    p2p_block_sender: UnboundedSender<Block>
-) { 
+    mut producer_block_reciever: UnboundedReceiver<Block>,
+    fork_choice: Arc<Mutex<ForkChoice>>, 
+    db: Arc<DB>,
+) -> Result<()> { 
     // Create a random PeerId
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
@@ -197,42 +203,57 @@ pub async fn network(
 
     for topic in GOSSIP_CORE_TOPICS { 
         let topic = Sha256Topic::new(topic);
-        gossipsub.subscribe(&topic).unwrap();
+        gossipsub.subscribe(&topic)?;
     }
 
-    let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id).unwrap();
+    let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
     let behaviour = ChainBehaviour { 
         gossipsub, 
         mdns
     };
 
     // Set up an encrypted DNS-enabled TCP Transport over the Mplex protocol.
-    let transport = libp2p::development_transport(local_key.clone()).await.unwrap();
+    let transport = libp2p::development_transport(local_key.clone()).await?;
     let mut swarm = Swarm::with_threadpool_executor(transport, behaviour, local_peer_id);
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
-    let mut tick = interval(Duration::from_secs(4));
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    let pubtime = rand::thread_rng().gen_range(5, 10);
+    info!("using pubtime {pubtime:?}");
+    let mut tick = interval(Duration::from_secs(pubtime));
 
     loop {
         select! {
             _ = tick.tick() => { 
-                info!("publishing...");
+                info!("publishing tx..");
 
                 let mut rng = OsRng{};
                 let keypair = Keypair::generate(&mut rng);
                 let transaction = Transaction { 
-                    address: [0; 32], 
+                    address: keypair.public.to_bytes(), 
                     amount: 420
                 };
                 let transaction = transaction.sign(&keypair);
                 let transaction = Broadcast::Transaction(transaction);
-                let bytes = transaction.try_to_vec().unwrap();
+                let bytes = transaction.try_to_vec()?;
 
                 let result = swarm.behaviour_mut()
                     .gossipsub
                     .publish(Sha256Topic::new(TRANSACTION_TOPIC), bytes);
 
                 if let Err(e) = result { 
-                    info!("err: {e:?}");
+                    info!("tx publish err: {e:?}");
+                }
+            }
+            Some(block) = producer_block_reciever.recv() => { 
+                info!("publishing block...");
+
+                let bytes = Broadcast::Block(block).try_to_vec()?;
+                let result = swarm.behaviour_mut()
+                    .gossipsub
+                    .publish(Sha256Topic::new(BLOCK_TOPIC), bytes);
+
+                if let Err(e) = result { 
+                    info!("block publish err: {e:?}");
                 }
             }
             event = swarm.select_next_some() => match event {
@@ -246,20 +267,27 @@ pub async fn network(
                     message,
                     ..
                  })) => { 
-                    // todo: can send without this await? 
-                    // txs need to go to the POW thread 
-                    // blocks need to go to the fork choice thread
-                    // data_sender.send(message.data).unwrap();
-                    let event = Broadcast::try_from_slice(message.data.as_slice()).unwrap();
+                    let event = Broadcast::try_from_slice(message.data.as_slice())?;
                     match event { 
                         Broadcast::Transaction(tx) => {
+                            info!("new p2p tx...");
                             // send to mempool
-                            p2p_tx_sender.send(tx).unwrap();
+                            p2p_tx_sender.send(tx)?;
                         },
                         Broadcast::Block(block) => {
-                            // send to block manager
-                            p2p_block_sender.send(block).unwrap();
-                        }
+                            info!("new p2p block ...");
+                            let block_hash = block.header.block_hash.unwrap(); 
+                            let parent_hash = block.header.parent_hash; 
+            
+                            // TODO: do some validation here 
+
+                            // re-produce the state change 
+                            // store new block's state
+            
+                            // TODO: handle when parent hash not found (ie, request parent from reciever)
+                            fork_choice.lock().await.insert(block_hash, parent_hash).unwrap();
+                            db.as_ref().put(block_hash, block.try_to_vec()?)?;
+                        }, 
                     } 
                 }
                 _ => { }
@@ -268,38 +296,182 @@ pub async fn network(
     }
 }
 
-// to build this out first
+const TXS_PER_BLOCK: usize = 1;
+const POW_N_ZEROS: usize = 3; // note: needs to be > 0
+const POW_LEN_ZEROS: usize = POW_N_ZEROS - 1;
+
 pub async fn block_producer(
     mut p2p_tx_reciever: UnboundedReceiver<SignedTransaction>,
+    p2p_block_sender: UnboundedSender<Block>,
     fork_choice: Arc<Mutex<ForkChoice>>, 
     db: Arc<DB>,
-) { 
+) -> Result<()> { 
     let mut mempool = vec![];
-    let mut current_head = fork_choice.blocking_lock().get_head().unwrap();
+    let mut current_head = fork_choice.lock().await.get_head().unwrap();
     
     loop { 
-        // sample N txs from mempool
-        // compute state transitions 
-        // build new block 
-        // do pow for a few rounds
-        // if success => { insert in DB + send to p2p to broadcast } 
-
-        // check for new head every once in a while
-        let head = fork_choice.blocking_lock().get_head().unwrap();
-        if head != current_head {
-            current_head = head;
-        }
-
         // add new txs to memepool
         while let Ok(tx) = p2p_tx_reciever.try_recv() {
             // do some verification here 
-            info!("new tx: {tx:?}");
+            info!("new tx...");
             if tx.verify().is_ok() { 
-                info!("tx verification passed");
+                info!("tx verification passed!");
                 mempool.push(tx);
-                info!("new mempool length: {}", mempool.len());
+            } else { 
+                info!("tx verification failed...");
             }
         } 
+
+        if mempool.len() < TXS_PER_BLOCK { 
+            info!("not enought txs ({} < {TXS_PER_BLOCK:?}), sleeping...", mempool.len());
+            sleep(Duration::from_secs(3)).await;
+            continue;
+        }
+        info!("POW mempool length: {}", mempool.len());
+
+        info!("producing new block...");
+
+        // sample N txs from mempool
+        let txs = &mempool[..TXS_PER_BLOCK];
+
+        // compute state transitions 
+        // TODO: change to get pinned to reduce memory copy of reading values
+        let head_block = Block::try_from_slice(
+            db.get(current_head)?.unwrap().as_slice()
+        )?;
+        let state_root = head_block.header.state_root;
+        let mut account_digests = AccountDigests::try_from_slice(
+            db.get(state_root)?.unwrap().as_slice()
+        )?.0;
+
+        // build new block 
+        info!("building new block state...");
+        let mut local_db = HashMap::new();
+
+        for tx in txs { 
+            let tx = &tx.transaction; 
+            let pubkey = tx.address;
+            let result = account_digests.iter().position(|(_, addr)| *addr == pubkey);
+            
+            let new_account = match result { 
+                Some(index) => { 
+                    let (account_digest, _) = account_digests[index];
+                    // look up existing account
+                    let mut account = Account::try_from_slice(
+                        db.get(account_digest)?.unwrap().as_slice()
+                    )?;
+                    assert!(account.address == pubkey);
+                    // process the tx 
+                    account.amount = tx.amount;
+                    // update digest list
+                    account_digests.remove(index);
+                    account
+                }, 
+                None => { 
+                    let account = Account { 
+                        address: pubkey, 
+                        amount: tx.amount
+                    };
+                    account
+                }
+            };
+
+            let digest = new_account.digest();
+            let account_bytes = new_account.try_to_vec()?;
+
+            local_db.insert(digest, account_bytes);
+            account_digests.push((digest, pubkey));
+        }
+
+        let txs = txs.to_vec();
+        let txs = Transactions(txs);
+        let tx_root = txs.digest();
+
+        let account_digests = AccountDigests(account_digests);
+        let state_root = account_digests.digest();
+
+        let mut block_header = BlockHeader { 
+            parent_hash: head_block.header.block_hash.unwrap(), 
+            state_root, 
+            tx_root, 
+            block_hash: None, 
+            nonce: 1
+        };
+
+        pub fn pow_loop(block_header: &mut BlockHeader, n_loops: usize) -> bool { 
+            for _ in 0..n_loops { 
+                let hash = block_header.compute_block_hash();
+                let n_zeros = POW_LEN_ZEROS.min(HASH_BYTE_SIZE);
+                let mut pow_success = true;
+                for i in 0..n_zeros { 
+                    if hash[i] != 0 { 
+                        pow_success = false;
+                        break;
+                    }
+                }
+                if pow_success { 
+                    return true;
+                }
+
+                // increment nonce 
+                block_header.nonce += 1;
+            }
+            false
+        }
+        
+        info!("running POW loop...");
+        // if success => { insert in DB + send to p2p to broadcast } 
+        // else new_head => { reset }
+        loop { 
+            // do pow for a few rounds
+            let result = pow_loop(&mut block_header, 10);
+            if result { 
+                // remove blocked txs from mempool 
+                for i in 0..TXS_PER_BLOCK { 
+                    mempool.remove(i);
+                }
+
+                // insert local state
+                // insert block into db 
+                block_header.commit_block_hash();
+                info!("new POW block produced: {:x?}", block_header.block_hash);
+
+                let block = Block { 
+                    header: block_header, 
+                    txs
+                };
+                // * block_digest => block
+                db.put(block.header.block_hash.unwrap(), block.try_to_vec()?)?;
+
+                // * block.state_root => vec[digest]
+                db.put(state_root, account_digests.try_to_vec()?)?;
+
+                // * new accounts: digest => account
+                for (k, v) in local_db { 
+                    db.put(k, v)?;
+                }
+
+                // send block to p2p + block manager
+                p2p_block_sender.send(block.clone())?;
+
+                let block_hash = block.header.block_hash.unwrap(); 
+                let parent_hash = block.header.parent_hash; 
+                fork_choice.lock().await.insert(block_hash, parent_hash).unwrap();
+                db.as_ref().put(block_hash, block.try_to_vec()?)?;
+
+                let head = fork_choice.lock().await.get_head().unwrap();
+                assert!(head != current_head);
+                break; // need this break to satisify borrow checker
+            }
+
+            // check for new head (from p2p) everyonce in a while
+            let head = fork_choice.lock().await.get_head().unwrap();
+            if head != current_head {
+                info!("[break] new chain head: {:?} -> {:?}", current_head, head);
+                current_head = head;
+                break; 
+            }
+        }
     }
 }
 
@@ -353,61 +525,62 @@ impl ForkChoice {
     }
 }
 
-pub async fn block_manager(
-    mut p2p_block_reciever: UnboundedReceiver<Block>,
-    fork_choice: Arc<Mutex<ForkChoice>>, 
-    db: Arc<DB>,
-) -> Result<()> { 
-    // keeps track of existing blocks + new blocks
-    loop { 
-        tokio::select! {
-            Some(block) = p2p_block_reciever.recv() => { 
-                let block_hash = block.header.block_hash.unwrap(); 
-                let parent_hash = block.header.parent_hash; 
-
-                // TODO: do some validation here 
-
-                // TODO: handle when parent hash not found (ie, request parent from reciever)
-                fork_choice.blocking_lock().insert(block_hash, parent_hash).unwrap();
-                db.as_ref().put(block_hash, block.try_to_vec()?)?;
-            }, 
-        }
-    }
-}
-
 pub fn main() -> Result<()> { 
     tracing_subscriber::fmt::init();
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
 
     // init db 
-    let path = "../db/";
+    let id = rand::thread_rng().gen_range(0, 100);
+    info!("using id: {id}");
+    let path = format!("../db_{id}/");
+
     let db = DB::open_default(path).unwrap();
     // we need shared access to the db 
     let db = Arc::new(db);
 
     runtime.block_on(async move { 
         let (p2p_tx_sender, p2p_tx_reciever) = unbounded_channel();
-        let (p2p_block_sender, p2p_block_reciever) = unbounded_channel();
-
-        tokio::spawn(network(p2p_tx_sender, p2p_block_sender)
-            .instrument(tracing::info_span!("network")));
+        let (producer_block_sender, producer_block_reciever) = unbounded_channel(); // producer => p2p
 
         // init genesis
-        let genesis = Block::genesis();
+        let mut genesis = Block::genesis();
         let genesis_hash = genesis.header.block_hash.unwrap();
+        info!("genisis hash: {:x?}", genesis_hash);
+
+        let account_digests = AccountDigests(vec![]);
+        let state_root = account_digests.digest();
+        genesis.header.state_root = state_root;
+
+        db.as_ref().put(state_root, account_digests.try_to_vec().unwrap()).unwrap();
+        db.as_ref().put(genesis_hash, genesis.try_to_vec().unwrap()).unwrap();
+
+        // setup fork choice with genesis
         let fork_choice = ForkChoice::new(genesis_hash);
         let fork_choice = Arc::new(Mutex::new(fork_choice));
 
-        db.as_ref().put(genesis_hash, genesis.try_to_vec().unwrap()).unwrap();
-
-        tokio::spawn(block_producer(p2p_tx_reciever, fork_choice.clone(), db.clone())
+        // begin
+        let fc_ = fork_choice.clone();
+        let db_ = db.clone();
+        tokio::spawn( async move { 
+            block_producer(
+                p2p_tx_reciever,
+                producer_block_sender, 
+                fc_, 
+                db_
+            )
             .instrument(tracing::info_span!("block producer"))
-        );
+            .await.unwrap()
+        });
 
         tokio::spawn(async move { 
-            block_manager(p2p_block_reciever, fork_choice.clone(), db.clone())
-                .instrument(tracing::info_span!("block manager"))
-                .await.unwrap()
+            network(
+                p2p_tx_sender, 
+                producer_block_reciever,
+                fork_choice, 
+                db
+            )
+            .instrument(tracing::info_span!("network"))
+            .await.unwrap()
         });
 
         loop { }
@@ -464,7 +637,7 @@ mod tests {
             Transaction { 
                 address: keypair.public.to_bytes(), 
                 amount: i
-            }
+            }.sign(&keypair)
         })
         .collect::<Vec<_>>();
         let txs = Transactions(txs);
