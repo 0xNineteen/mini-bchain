@@ -28,17 +28,16 @@ pub fn main() -> Result<()> {
     // init db
     let id = rand::thread_rng().gen_range(0, 100);
     info!("using id: {id}");
-    let path = format!("../db_{id}/");
+    let path = format!("./db/db_{id}/");
 
     let db = DB::open_default(path).unwrap();
-    // we need shared access to the db
     let db = Arc::new(db);
 
     runtime.block_on(async move {
-        let (p2p_tx_sender, p2p_tx_reciever) = unbounded_channel();
+        let (p2p_tx_sender, p2p_tx_reciever) = unbounded_channel(); // p2p => producer
         let (producer_block_sender, producer_block_reciever) = unbounded_channel(); // producer => p2p
 
-        // init genesis
+        // init genesis + database
         let mut genesis = Block::genesis();
         let genesis_hash = genesis.header.block_hash.unwrap();
         info!("genisis hash: {:x?}", genesis_hash);
