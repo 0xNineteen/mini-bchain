@@ -41,7 +41,7 @@ enum Broadcast {
     Block(Block),
 }
 
-pub async fn network(
+pub async fn network<DB: ChainDB>(
     p2p_tx_sender: UnboundedSender<SignedTransaction>,
     mut producer_block_reciever: UnboundedReceiver<Block>,
     fork_choice: Arc<Mutex<ForkChoice>>,
@@ -78,6 +78,7 @@ pub async fn network(
     loop {
         select! {
             _ = tick.tick() => {
+                // todo: change into client with RPC (not gossip sub lol)
                 info!("publishing tx..");
 
                 let mut rng = OsRng{};
@@ -130,20 +131,17 @@ pub async fn network(
                         },
                         Broadcast::Block(block) => {
                             info!("new p2p block ...");
-                            let block_hash = block.header.block_hash.unwrap();
-                            let parent_hash = block.header.parent_hash;
 
-                            let head_block = Block::try_from_slice(
-                                db.get(parent_hash)?.unwrap().as_slice()
-                            )?;
+                            let parent_hash = block.header.parent_hash;
+                            let parent_block = db.get(parent_hash)?;
                             let txs = &block.txs.0;
 
                             // re-produce the state change
                             let (
                                 mut block_header,
                                 account_digests,
-                                local_db
-                            ) = state_transition(head_block, txs, db.clone())?;
+                                new_accounts
+                            ) = state_transition(parent_block, txs, db.clone())?;
                             block_header.nonce = block.header.nonce;
                             block_header.commit_block_hash();
 
@@ -161,10 +159,8 @@ pub async fn network(
                             info!("block verification passed...");
 
                             // store new block's state
-                            commit_new_block(&block, account_digests, local_db, fork_choice.clone(), db.clone()).await?;
-
-                            fork_choice.lock().await.insert(block_hash, parent_hash).unwrap();
-                            db.as_ref().put(block_hash, block.try_to_vec()?)?;
+                            // todo: move behind forkchoice? 
+                            commit_new_block(&block, account_digests, new_accounts, fork_choice.clone(), db.clone()).await?;
                         },
                     }
                 }

@@ -1,7 +1,5 @@
 use std::sync::Arc;
 use std::vec;
-use rocksdb::DB;
-use borsh::BorshDeserialize;
 use anyhow::Result;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -13,7 +11,7 @@ use crate::structures::*;
 use crate::fork_choice::*;
 use crate::state::*;
 
-pub async fn block_producer(
+pub async fn block_producer<DB: ChainDB>(
     mut p2p_tx_reciever: UnboundedReceiver<SignedTransaction>,
     p2p_block_sender: UnboundedSender<Block>,
     fork_choice: Arc<Mutex<ForkChoice>>,
@@ -53,8 +51,8 @@ pub async fn block_producer(
         // compute state transitions
 
         // TODO: change to get pinned to reduce memory copy of reading values
-        let head_block = Block::try_from_slice(db.get(current_head)?.unwrap().as_slice())?;
-        let (mut block_header, account_digests, local_db) =
+        let head_block = db.get(current_head)?;
+        let (mut block_header, account_digests, new_accounts) =
             state_transition(head_block, txs, db.clone())?;
 
         pub fn pow_loop(block_header: &mut BlockHeader, n_loops: usize) -> bool {
@@ -93,7 +91,7 @@ pub async fn block_producer(
                 commit_new_block(
                     &block,
                     account_digests,
-                    local_db,
+                    new_accounts,
                     fork_choice.clone(),
                     db.clone(),
                 )

@@ -17,6 +17,10 @@ pub const POW_LEN_ZEROS: usize = POW_N_ZEROS - 1;
 
 // defines the Account, Transaction, and Block structures of the blockchain
 
+pub trait ChainDigest { 
+    fn digest(&self) -> Sha256Bytes;
+}
+
 /* ACCOUNT STRUCTS */
 #[derive(BorshDeserialize, BorshSerialize, Default, Debug, PartialEq, Eq, Clone)]
 pub struct Account {
@@ -24,8 +28,8 @@ pub struct Account {
     pub amount: u128,
 }
 
-impl Account {
-    pub fn digest(&self) -> Sha256Bytes {
+impl ChainDigest for Account {
+    fn digest(&self) -> Sha256Bytes {
         let bytes = self.try_to_vec().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(bytes);
@@ -37,8 +41,8 @@ impl Account {
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct AccountDigests(pub Vec<(Sha256Bytes, Key256Bytes)>);
 
-impl AccountDigests {
-    pub fn digest(&self) -> Sha256Bytes {
+impl ChainDigest for AccountDigests {
+    fn digest(&self) -> Sha256Bytes {
         let mut hasher = Sha256::new();
         self.0
             .iter()
@@ -60,14 +64,16 @@ pub struct SignedTransaction {
     pub signature: Option<SignatureBytes>,
 }
 
-impl Transaction {
-    pub fn digest(&self) -> Sha256Bytes {
+impl ChainDigest for Transaction {
+    fn digest(&self) -> Sha256Bytes {
         let bytes = self.try_to_vec().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         hasher.finalize().as_slice().try_into().unwrap()
     }
+}
 
+impl Transaction {
     // consumes
     pub fn sign(self, keypair: &Keypair) -> SignedTransaction {
         let digest = self.digest();
@@ -93,8 +99,8 @@ impl SignedTransaction {
 #[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
 pub struct Transactions(pub Vec<SignedTransaction>);
 
-impl Transactions {
-    pub fn digest(&self) -> Sha256Bytes {
+impl ChainDigest for Transactions {
+    fn digest(&self) -> Sha256Bytes {
         let mut hasher = Sha256::new();
         self.0
             .iter()
@@ -113,6 +119,15 @@ pub struct BlockHeader {
     pub nonce: u128,
 }
 
+impl ChainDigest for BlockHeader { 
+    fn digest(&self) -> Sha256Bytes {
+        match self.block_hash { 
+            Some(hash) => hash, 
+            None => self.compute_block_hash()
+        }
+    }
+}
+
 #[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
 pub struct Block {
     pub header: BlockHeader,
@@ -124,6 +139,12 @@ impl Block {
         let header = BlockHeader::genesis();
         let txs = Transactions(vec![]);
         Block { header, txs }
+    }
+}
+
+impl ChainDigest for Block { 
+    fn digest(&self) -> Sha256Bytes {
+        self.header.digest()
     }
 }
 
