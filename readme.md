@@ -13,7 +13,7 @@ a mini blockchain written in rust for learning purposes :)
 - `src/state.rs`: manages chain state (process txs to get new state)
 - `src/lib.rs`: main node loop
 
-## architechture 
+## architecture 
 
 ![](imgs/2023-03-13-16-14-12.png)
 
