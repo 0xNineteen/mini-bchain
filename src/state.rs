@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+
 use std::sync::Arc;
 use rocksdb::DB;
 use borsh::{BorshDeserialize, BorshSerialize};
-use anyhow::{Result, Chain};
+use anyhow::{Result};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -102,7 +102,7 @@ pub async fn commit_new_block<T: ChainDB>(
     for account in new_accounts {
         db.put(&account)?;
     }
-    db.put(&account_digests);
+    db.put(&account_digests)?;
     db.put(block)?;
 
     // TODO: handle when parent hash not found (ie, request parent from reciever)

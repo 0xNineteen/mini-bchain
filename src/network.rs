@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::vec;
 use rand::Rng;
-use rocksdb::DB;
+
 use anyhow::Result;
 use borsh::{BorshDeserialize, BorshSerialize};
 use ed25519_dalek::Keypair;
