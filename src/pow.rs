@@ -46,12 +46,14 @@ pub async fn block_producer<DB: ChainDB>(
         info!("producing new block...");
 
         // sample N txs from mempool
-        let txs = &mempool[..TXS_PER_BLOCK];
+        let txs = &mempool[..TXS_PER_BLOCK].try_into()?;
 
         // compute state transitions
 
         // TODO: change to get pinned to reduce memory copy of reading values
-        let head_block = db.get(current_head)?;
+        let head_block = db.get_pinned(current_head)?;
+        let head_block = bytemuck::from_bytes(&*head_block);
+
         let (mut block_header, account_digests, new_accounts) =
             state_transition(head_block, txs, db.clone())?;
 
@@ -76,7 +78,7 @@ pub async fn block_producer<DB: ChainDB>(
                 info!("new POW block produced: {:x?}", block_header.block_hash);
 
                 // remove blocked txs from mempool
-                let txs = Transactions(txs.to_vec());
+                let txs = Transactions(*txs);
                 for _ in 0..TXS_PER_BLOCK {
                     mempool.remove(0);
                 }

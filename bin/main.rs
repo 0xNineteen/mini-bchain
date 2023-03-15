@@ -35,14 +35,14 @@ pub fn main() -> Result<()> {
 
         // init genesis + database
         let mut genesis = Block::genesis();
-        let genesis_hash = genesis.header.block_hash.unwrap();
+        let genesis_hash = genesis.header.block_hash;
         info!("genisis hash: {:x?}", genesis_hash);
 
         let account_digests = AccountDigests(vec![]);
         let state_root = account_digests.digest();
         genesis.header.state_root = state_root;
         
-        db.put(&account_digests).unwrap();
+        db.put_vec(&account_digests).unwrap();
         db.put(&genesis).unwrap();
 
         // setup fork choice with genesis

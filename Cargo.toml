@@ -9,9 +9,14 @@ edition = "2021"
 path = "bin/main.rs"
 name = "main"
 
+[[bin]]
+path = "bin/tmp.rs"
+name = "tmp"
+
 [dependencies]
 anyhow = "1.0.69"
 borsh = "0.10.2"
+bytemuck = { version = "1.13.1", features = ["derive"] }
 ed25519-dalek = "1.0.1"
 libp2p = { version = "0.51.0", features = ["full"] }
 paste = "1.0.12"

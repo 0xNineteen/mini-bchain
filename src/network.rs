@@ -3,7 +3,6 @@ use std::vec;
 use rand::Rng;
 
 use anyhow::Result;
-use borsh::{BorshDeserialize, BorshSerialize};
 use ed25519_dalek::Keypair;
 use rand::rngs::OsRng;
 
@@ -33,12 +32,6 @@ const GOSSIP_CORE_TOPICS: [&str; 2] = [TRANSACTION_TOPIC, BLOCK_TOPIC];
 struct ChainBehaviour {
     gossipsub: gossipsub::Behaviour,
     mdns: mdns::async_io::Behaviour,
-}
-
-#[derive(BorshSerialize, BorshDeserialize, Debug)]
-enum Broadcast {
-    Transaction(SignedTransaction),
-    Block(Block),
 }
 
 pub async fn network<DB: ChainDB>(
@@ -88,8 +81,7 @@ pub async fn network<DB: ChainDB>(
                     amount: 420
                 };
                 let transaction = transaction.sign(&keypair);
-                let transaction = Broadcast::Transaction(transaction);
-                let bytes = transaction.try_to_vec()?;
+                let bytes = bytemuck::bytes_of(&transaction);
 
                 let result = swarm.behaviour_mut()
                     .gossipsub
@@ -102,7 +94,7 @@ pub async fn network<DB: ChainDB>(
             Some(block) = producer_block_reciever.recv() => {
                 info!("publishing block...");
 
-                let bytes = Broadcast::Block(block).try_to_vec()?;
+                let bytes = bytemuck::bytes_of(&block);
                 let result = swarm.behaviour_mut()
                     .gossipsub
                     .publish(Sha256Topic::new(BLOCK_TOPIC), bytes);
@@ -122,18 +114,26 @@ pub async fn network<DB: ChainDB>(
                     message,
                     ..
                  })) => {
-                    let event = Broadcast::try_from_slice(message.data.as_slice())?;
-                    match event {
-                        Broadcast::Transaction(tx) => {
-                            info!("new p2p tx...");
+                    let data = message.data.as_slice();
+
+                    match bytemuck::try_from_bytes::<SignedTransaction>(data) {
+                        Ok(tx) => {
                             // send to mempool
-                            p2p_tx_sender.send(tx)?;
+                            info!("new p2p tx...");
+                            p2p_tx_sender.send(*tx)?; // clone :(
+                            continue;
                         },
-                        Broadcast::Block(block) => {
+                        Err(_) => {}
+                    }
+
+
+                    match bytemuck::try_from_bytes::<Block>(data) {
+                        Ok(block) => {
                             info!("new p2p block ...");
 
                             let parent_hash = block.header.parent_hash;
-                            let parent_block = db.get(parent_hash)?;
+                            let parent_block = db.get_pinned(parent_hash)?; // readonly / zerocopy
+                            let parent_block = bytemuck::from_bytes(&*parent_block); // does this do a copy? idk 
                             let txs = &block.txs.0;
 
                             // re-produce the state change
@@ -162,6 +162,9 @@ pub async fn network<DB: ChainDB>(
                             // todo: move behind forkchoice? 
                             commit_new_block(&block, account_digests, new_accounts, fork_choice.clone(), db.clone()).await?;
                         },
+                        Err(_) => {
+                            info!("serialization failed...");
+                        }
                     }
                 }
                 _ => { }

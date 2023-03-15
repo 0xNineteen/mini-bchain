@@ -1,4 +1,3 @@
-use std::vec;
 use borsh::{BorshDeserialize, BorshSerialize};
 use ed25519_dalek::{Keypair, PublicKey, Signature, SignatureError};
 use ed25519_dalek::{Signer, Verifier};
@@ -6,23 +5,28 @@ use sha2::{Digest, Sha256};
 
 use anyhow::Result;
 
+use bytemuck::{Pod, Zeroable, bytes_of};
+
 pub const HASH_BYTE_SIZE: usize = 32;
 pub type Sha256Bytes = [u8; HASH_BYTE_SIZE];
 pub type Key256Bytes = [u8; 32]; // public/private key
 pub type SignatureBytes = [u8; Signature::BYTE_SIZE];
 
-pub const TXS_PER_BLOCK: usize = 5;
+pub const TXS_PER_BLOCK: usize = 2;
 pub const POW_N_ZEROS: usize = 3; // note: needs to be > 0
 pub const POW_LEN_ZEROS: usize = POW_N_ZEROS - 1;
+
 
 // defines the Account, Transaction, and Block structures of the blockchain
 
 pub trait ChainDigest { 
+    // todo: use a proc macro to derive
     fn digest(&self) -> Sha256Bytes;
 }
 
 /* ACCOUNT STRUCTS */
-#[derive(BorshDeserialize, BorshSerialize, Default, Debug, PartialEq, Eq, Clone)]
+#[repr(C)]
+#[derive(Pod, Zeroable, Copy, Default, Debug, PartialEq, Eq, Clone)]
 pub struct Account {
     pub address: Key256Bytes,
     pub amount: u128,
@@ -30,43 +34,45 @@ pub struct Account {
 
 impl ChainDigest for Account {
     fn digest(&self) -> Sha256Bytes {
-        let bytes = self.try_to_vec().unwrap();
+        let bytes = bytemuck::bytes_of(self);
         let mut hasher = Sha256::new();
-        hasher.update(bytes);
+        hasher.update(bytes); // copy
         hasher.finalize().as_slice().try_into().unwrap()
     }
 }
 
 // [(digest, pubkey_bytes)]
-#[derive(BorshDeserialize, BorshSerialize)]
+// cant impl Copy bc its a Vec and so cant impl Pod/zero-copy :(
+#[derive(BorshDeserialize, BorshSerialize, Clone)] 
 pub struct AccountDigests(pub Vec<(Sha256Bytes, Key256Bytes)>);
 
 impl ChainDigest for AccountDigests {
     fn digest(&self) -> Sha256Bytes {
+        let bytes = self.try_to_vec().unwrap();
         let mut hasher = Sha256::new();
-        self.0
-            .iter()
-            .for_each(|(d, _)| sha2::Digest::update(&mut hasher, d));
+        hasher.update(bytes); // copy
         hasher.finalize().as_slice().try_into().unwrap()
     }
 }
 
 /* TRANSACTION STRUCTS */
-#[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Eq, Clone)]
+#[repr(C)]
+#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone)]
 pub struct Transaction {
     pub address: Key256Bytes,
     pub amount: u128,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Eq, Clone)]
+#[repr(C)]
+#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone)]
 pub struct SignedTransaction {
     pub transaction: Transaction,
-    pub signature: Option<SignatureBytes>,
+    pub signature: SignatureBytes,
 }
 
 impl ChainDigest for Transaction {
     fn digest(&self) -> Sha256Bytes {
-        let bytes = self.try_to_vec().unwrap();
+        let bytes = bytes_of(self);
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         hasher.finalize().as_slice().try_into().unwrap()
@@ -81,7 +87,7 @@ impl Transaction {
         let sig_bytes = sig.to_bytes();
         SignedTransaction {
             transaction: self,
-            signature: sig_bytes.try_into().unwrap(),
+            signature: sig_bytes,
         }
     }
 }
@@ -91,44 +97,43 @@ impl SignedTransaction {
         let digest = self.transaction.digest();
         // todo: remove these unwrap()s and return a result<>
         let publickey = PublicKey::from_bytes(self.transaction.address.as_slice())?;
-        let sig = Signature::from_bytes(self.signature.unwrap().as_slice())?;
+        let sig = Signature::from_bytes(self.signature.as_slice())?;
         publickey.verify(digest.as_slice(), &sig)
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
-pub struct Transactions(pub Vec<SignedTransaction>);
+#[repr(C)]
+#[derive(Pod, Zeroable, Copy, Debug, Clone)]
+pub struct Transactions(pub [SignedTransaction; TXS_PER_BLOCK]);
 
 impl ChainDigest for Transactions {
     fn digest(&self) -> Sha256Bytes {
+        let bytes = bytemuck::bytes_of(self);
         let mut hasher = Sha256::new();
-        self.0
-            .iter()
-            .for_each(|d| sha2::Digest::update(&mut hasher, d.try_to_vec().unwrap().as_slice()));
+        hasher.update(bytes); // copy
         hasher.finalize().as_slice().try_into().unwrap()
     }
 }
 
 /* BLOCK STRUCTS */
-#[derive(BorshDeserialize, BorshSerialize, Debug, Default, Clone)]
+#[repr(C)]
+#[derive(Pod, Zeroable, Copy, Debug, Default, Clone)]
 pub struct BlockHeader {
     pub parent_hash: Sha256Bytes,
     pub state_root: Sha256Bytes,
     pub tx_root: Sha256Bytes,
-    pub block_hash: Option<Sha256Bytes>,
+    pub block_hash: Sha256Bytes,
     pub nonce: u128,
 }
 
 impl ChainDigest for BlockHeader { 
     fn digest(&self) -> Sha256Bytes {
-        match self.block_hash { 
-            Some(hash) => hash, 
-            None => self.compute_block_hash()
-        }
+        self.block_hash
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
+#[repr(C)]
+#[derive(Pod, Zeroable, Copy, Debug, Clone)]
 pub struct Block {
     pub header: BlockHeader,
     pub txs: Transactions,
@@ -137,7 +142,9 @@ pub struct Block {
 impl Block {
     pub fn genesis() -> Self {
         let header = BlockHeader::genesis();
-        let txs = Transactions(vec![]);
+        let txs = Transactions([
+            SignedTransaction::zeroed(); TXS_PER_BLOCK
+        ]);
         Block { header, txs }
     }
 }
@@ -154,7 +161,7 @@ impl BlockHeader {
             state_root: [0; HASH_BYTE_SIZE],
             tx_root: [0; HASH_BYTE_SIZE],
             parent_hash: [0; HASH_BYTE_SIZE],
-            block_hash: None,
+            block_hash: [0; HASH_BYTE_SIZE],
             nonce: 0,
         };
         block.commit_block_hash();
@@ -162,7 +169,7 @@ impl BlockHeader {
     }
 
     pub fn commit_block_hash(&mut self) {
-        self.block_hash = Some(self.compute_block_hash());
+        self.block_hash = self.compute_block_hash();
     }
 
     pub fn compute_block_hash(&self) -> Sha256Bytes {
@@ -188,3 +195,11 @@ impl BlockHeader {
         pow_success
     }
 }
+
+// #[cfg(test)] 
+// mod tests { 
+//     #[test]
+//     pub fn test_zero_copy() { 
+
+//     }
+// }

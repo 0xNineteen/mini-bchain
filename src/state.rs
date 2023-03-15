@@ -1,8 +1,9 @@
-
+use std::pin::Pin;
 use std::sync::Arc;
-use rocksdb::DB;
+use bytemuck::{Pod, bytes_of};
+use rocksdb::{DB, DBPinnableSlice};
 use borsh::{BorshDeserialize, BorshSerialize};
-use anyhow::{Result};
+use anyhow::{Result, anyhow};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -14,18 +15,44 @@ pub struct RocksDB {
 }
 
 pub trait ChainDB { 
-    fn get<T: BorshDeserialize>(&self, key: Sha256Bytes) -> Result<T>;
-    fn put<T: BorshSerialize + ChainDigest>(&self, value: &T) -> Result<Sha256Bytes>;
+    fn get<T: Pod>(&self, key: Sha256Bytes) -> Result<T>;
+    fn get_pinned(&self, key: Sha256Bytes) -> Result<DBPinnableSlice>;
+    fn get_vec<T: BorshDeserialize>(&self, key: Sha256Bytes) -> Result<T>;
+    // todo: get_pinned to reduce memory copys when just reading values
+    fn put<T: Pod + ChainDigest>(&self, value: &T) -> Result<Sha256Bytes>;
+    fn put_vec<T: BorshSerialize + ChainDigest>(&self, value: &T) -> Result<Sha256Bytes>;
 }
 
 impl ChainDB for RocksDB { 
-    fn get<T: BorshDeserialize>(&self, key: Sha256Bytes) -> Result<T> {
+    fn get<T: Pod>(&self, key: Sha256Bytes) -> Result<T> {
+        Ok(*bytemuck::try_from_bytes(
+            self.db.get(key)?.unwrap().as_slice()
+        ).map_err(|o| anyhow!("db get casting error: {o:?}"))?)
+    }
+
+    fn get_vec<T: BorshDeserialize>(&self, key: Sha256Bytes) -> Result<T> {
+        // copy :(
         Ok(T::try_from_slice(
             self.db.get(key)?.unwrap().as_slice()
         )?)
     }
 
-    fn put<T: BorshSerialize + ChainDigest>(&self, value: &T) -> Result<Sha256Bytes> {
+    fn get_pinned(&self, key: Sha256Bytes) -> Result<DBPinnableSlice> {
+        let pinned_data = self.db.get_pinned(key)?.unwrap();
+        // let t: &T = bytemuck::try_from_bytes(
+        //     pinned_data
+        // ).map_err(|o| anyhow!("db get casting error: {o:?}"))?; 
+        // let t_pinned = Pin::new(t);
+        Ok(pinned_data)
+    }
+
+    fn put<T: Pod + ChainDigest>(&self, value: &T) -> Result<Sha256Bytes> {
+        let key = value.digest();
+        self.db.put(key, bytemuck::bytes_of(value))?;
+        Ok(key)
+    }
+
+    fn put_vec<T: BorshSerialize + ChainDigest>(&self, value: &T) -> Result<Sha256Bytes> {
         let key = value.digest();
         self.db.put(key, value.try_to_vec()?)?;
         Ok(key)
@@ -33,12 +60,12 @@ impl ChainDB for RocksDB {
 }
 
 pub fn state_transition<DB: ChainDB>(
-    parent_block: Block,
-    txs: &[SignedTransaction],
+    parent_block: &Block,
+    txs: &[SignedTransaction; TXS_PER_BLOCK],
     db: Arc<DB>,
 ) -> Result<(BlockHeader, AccountDigests, Vec<Account>)> {
     let state_root = parent_block.header.state_root;
-    let mut account_digests = db.get::<AccountDigests>(state_root)?.0;
+    let mut account_digests = db.get_vec::<AccountDigests>(state_root)?.0;
 
     // build new block
     info!("building new block state...");
@@ -73,19 +100,17 @@ pub fn state_transition<DB: ChainDB>(
         account_digests.push((digest, pubkey));
     }
 
-    let txs = txs.to_vec();
-    let txs = Transactions(txs);
+    let txs = Transactions(*txs);
     let tx_root = txs.digest();
 
     let account_digests = AccountDigests(account_digests);
     let state_root = account_digests.digest();
 
     let block_header = BlockHeader {
-        parent_hash: parent_block.header.block_hash.unwrap(),
+        parent_hash: parent_block.header.block_hash,
         state_root,
         tx_root,
-        block_hash: None,
-        nonce: 1,
+        .. BlockHeader::default()
     };
 
     Ok((block_header, account_digests, new_accounts))
@@ -102,18 +127,17 @@ pub async fn commit_new_block<T: ChainDB>(
     for account in new_accounts {
         db.put(&account)?;
     }
-    db.put(&account_digests)?;
+    db.put_vec(&account_digests)?;
     db.put(block)?;
 
     // TODO: handle when parent hash not found (ie, request parent from reciever)
-    let block_hash = block.header.block_hash.unwrap();
+    let block_hash = block.header.block_hash;
     let parent_hash = block.header.parent_hash;
 
     fork_choice
         .lock()
         .await
-        .insert(block_hash, parent_hash)
-        .unwrap();
+        .insert(block_hash, parent_hash)?;
 
     Ok(())
 }
