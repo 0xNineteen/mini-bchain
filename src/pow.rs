@@ -25,12 +25,12 @@ pub async fn block_producer<DB: ChainDB>(
         // add new txs to memepool
         while let Ok(tx) = p2p_tx_reciever.try_recv() {
             // do some verification here
-            info!("new tx...");
+            // info!("new tx...");
             if tx.verify().is_ok() {
-                info!("tx verification passed!");
+                // info!("tx verification passed!");
                 mempool.push(tx);
             } else {
-                info!("tx verification failed...");
+                // info!("tx verification failed...");
             }
         }
 

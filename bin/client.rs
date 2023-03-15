@@ -31,6 +31,9 @@ pub async fn main() -> Result<()> {
     let mut tick = interval(Duration::from_nanos(pubtime));
     info!("using pubtime {pubtime:?}");
 
+    let tps_tick_seconds = 2;
+    let mut tps_tick = interval(Duration::from_secs(tps_tick_seconds));
+
     let gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
         gossipsub::Config::default(),
@@ -45,6 +48,8 @@ pub async fn main() -> Result<()> {
     let mut swarm = Swarm::with_threadpool_executor(transport, behaviour, local_peer_id);
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
+    let mut counter: u128 = 0;
+
     loop { 
         select! {
             event = swarm.select_next_some() => match event {
@@ -55,7 +60,13 @@ pub async fn main() -> Result<()> {
                 },
                 _ => {}
             },
+            _ = tps_tick.tick() => { 
+                info!("tps: {}", counter / tps_tick_seconds as u128);
+                counter = 0;
+            },
             _ = tick.tick() => {
+                counter += 1;
+
                 // todo: change into client with RPC (not gossip sub lol)
                 let mut rng = OsRng{};
                 let keypair = Keypair::generate(&mut rng);
@@ -70,9 +81,9 @@ pub async fn main() -> Result<()> {
                     .gossipsub
                     .publish(Sha256Topic::new(TRANSACTION_TOPIC), bytes);
 
-                if let Err(e) = result {
-                    info!("tx publish err: {e:?}");
-                }
+                // if let Err(e) = result {
+                //     info!("tx publish err: {e:?}");
+                // }
             }, 
         }
     }

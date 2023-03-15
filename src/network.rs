@@ -5,6 +5,7 @@ use anyhow::Result;
 
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::Sha256Topic;
+use libp2p::{quic, dns, websocket, Transport};
 use libp2p::{
     gossipsub, identity, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
 };
@@ -54,8 +55,23 @@ pub async fn network<DB: ChainDB>(
     let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
     let behaviour = ChainBehaviour { gossipsub, mdns };
 
-    // Set up an encrypted DNS-enabled TCP Transport over the Mplex protocol.
+    // // Set up an encrypted DNS-enabled TCP Transport over the Mplex protocol.
     let transport = libp2p::development_transport(local_key.clone()).await?;
+
+    // // todo: get quicc working 
+    // let transport = {
+    //     let quic_config = quic::Config::new(&local_key);
+    //     let dns_quic = dns::DnsConfig::system(
+    //         quic::async_std::Transport::new(quic_config)
+    //     ).await?;
+
+    //     let ws_dns_quic = websocket::WsConfig::new(
+    //         dns_quic
+    //     );
+
+    //     dns_quic.boxed()
+    // };
+
     let mut swarm = Swarm::with_threadpool_executor(transport, behaviour, local_peer_id);
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
