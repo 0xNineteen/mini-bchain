@@ -50,8 +50,7 @@ pub async fn block_producer<DB: ChainDB>(
         let txs = &mempool[..TXS_PER_BLOCK].try_into()?;
 
         // compute state transitions
-
-        get_pinned!(db current_head => head_block); // does this 
+        get_pinned!(db current_head => head_block);
 
         let (mut block_header, account_digests, new_accounts) =
             state_transition(head_block, txs, db.clone())?;

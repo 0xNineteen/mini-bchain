@@ -1,4 +1,3 @@
-use std::pin::Pin;
 use std::sync::Arc;
 use bytemuck::{Pod, bytes_of};
 use rocksdb::{DB, DBPinnableSlice};
@@ -25,7 +24,7 @@ pub trait ChainDB {
 macro_rules! get_pinned {
     ($db:ident $hash:ident => $name:ident) => {
         let $name = $db.get_pinned($hash)?; // cant deserialize in fcn so we use macro
-        let $name = bytemuck::from_bytes($name.deref());
+        let $name = bytemuck::from_bytes($name.deref()); // zero copy
     };
 }
 
@@ -65,6 +64,7 @@ impl ChainDB for RocksDB {
     }
 }
 
+// todo: use hash tree lookup (eth full optimized)
 pub fn state_transition<DB: ChainDB>(
     parent_block: &Block,
     txs: &[SignedTransaction; TXS_PER_BLOCK],
@@ -77,6 +77,7 @@ pub fn state_transition<DB: ChainDB>(
     info!("building new block state...");
     let mut new_accounts = vec![];
 
+    // todo: parallel processing txs
     for tx in txs {
         let tx = &tx.transaction;
         let pubkey = tx.address;

@@ -16,6 +16,7 @@ use mini_bchain::pow::*;
 use mini_bchain::structures::*;
 use mini_bchain::fork_choice::ForkChoice;
 
+
 pub fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();

@@ -95,7 +95,6 @@ impl Transaction {
 impl SignedTransaction {
     pub fn verify(&self) -> Result<(), SignatureError> {
         let digest = self.transaction.digest();
-        // todo: remove these unwrap()s and return a result<>
         let publickey = PublicKey::from_bytes(self.transaction.address.as_slice())?;
         let sig = Signature::from_bytes(self.signature.as_slice())?;
         publickey.verify(digest.as_slice(), &sig)

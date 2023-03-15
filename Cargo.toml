@@ -10,8 +10,8 @@ path = "bin/main.rs"
 name = "main"
 
 [[bin]]
-path = "bin/tmp.rs"
-name = "tmp"
+path = "bin/client.rs"
+name = "client"
 
 [dependencies]
 anyhow = "1.0.69"
@@ -21,6 +21,7 @@ ed25519-dalek = "1.0.1"
 libp2p = { version = "0.51.0", features = ["full"] }
 paste = "1.0.12"
 rand = "0.7.0"
+rayon = "1.7.0"
 rocksdb = "0.20.1"
 sha2 = "0.10.6"
 tokio = { version = "1.26.0", features = ["full"] }
