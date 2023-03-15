@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::sync::Arc;
 use std::vec;
 use anyhow::Result;
@@ -50,9 +51,7 @@ pub async fn block_producer<DB: ChainDB>(
 
         // compute state transitions
 
-        // TODO: change to get pinned to reduce memory copy of reading values
-        let head_block = db.get_pinned(current_head)?;
-        let head_block = bytemuck::from_bytes(&*head_block);
+        get_pinned!(db current_head => head_block); // does this 
 
         let (mut block_header, account_digests, new_accounts) =
             state_transition(head_block, txs, db.clone())?;

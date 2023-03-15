@@ -18,10 +18,18 @@ pub trait ChainDB {
     fn get<T: Pod>(&self, key: Sha256Bytes) -> Result<T>;
     fn get_pinned(&self, key: Sha256Bytes) -> Result<DBPinnableSlice>;
     fn get_vec<T: BorshDeserialize>(&self, key: Sha256Bytes) -> Result<T>;
-    // todo: get_pinned to reduce memory copys when just reading values
     fn put<T: Pod + ChainDigest>(&self, value: &T) -> Result<Sha256Bytes>;
     fn put_vec<T: BorshSerialize + ChainDigest>(&self, value: &T) -> Result<Sha256Bytes>;
 }
+
+macro_rules! get_pinned {
+    ($db:ident $hash:ident => $name:ident) => {
+        let $name = $db.get_pinned($hash)?; // cant deserialize in fcn so we use macro
+        let $name = bytemuck::from_bytes($name.deref());
+    };
+}
+
+pub(crate) use get_pinned;
 
 impl ChainDB for RocksDB { 
     fn get<T: Pod>(&self, key: Sha256Bytes) -> Result<T> {
@@ -37,12 +45,10 @@ impl ChainDB for RocksDB {
         )?)
     }
 
+    // should use macro get_pinned!
     fn get_pinned(&self, key: Sha256Bytes) -> Result<DBPinnableSlice> {
         let pinned_data = self.db.get_pinned(key)?.unwrap();
-        // let t: &T = bytemuck::try_from_bytes(
-        //     pinned_data
-        // ).map_err(|o| anyhow!("db get casting error: {o:?}"))?; 
-        // let t_pinned = Pin::new(t);
+        // cant do deserialization here :(
         Ok(pinned_data)
     }
 

@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::sync::Arc;
 use std::vec;
 use rand::Rng;
@@ -132,8 +133,8 @@ pub async fn network<DB: ChainDB>(
                             info!("new p2p block ...");
 
                             let parent_hash = block.header.parent_hash;
-                            let parent_block = db.get_pinned(parent_hash)?; // readonly / zerocopy
-                            let parent_block = bytemuck::from_bytes(&*parent_block); // does this do a copy? idk 
+                            get_pinned!(db parent_hash => parent_block);
+
                             let txs = &block.txs.0;
 
                             // re-produce the state change
