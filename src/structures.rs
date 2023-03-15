@@ -12,7 +12,7 @@ pub type Sha256Bytes = [u8; HASH_BYTE_SIZE];
 pub type Key256Bytes = [u8; 32]; // public/private key
 pub type SignatureBytes = [u8; Signature::BYTE_SIZE];
 
-pub const TXS_PER_BLOCK: usize = 2000; // todo: make this dynamic ? 
+pub const TXS_PER_BLOCK: usize = 2048; // todo: make this dynamic ? 
 pub const POW_N_ZEROS: usize = 3; // note: needs to be > 0
 pub const POW_LEN_ZEROS: usize = POW_N_ZEROS - 1;
 
