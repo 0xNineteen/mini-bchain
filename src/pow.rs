@@ -12,6 +12,7 @@ use crate::structures::*;
 use crate::fork_choice::*;
 use crate::state::*;
 
+// todo: include a state s.t if the network fails this auto-stops
 pub async fn block_producer<DB: ChainDB>(
     mut p2p_tx_reciever: UnboundedReceiver<SignedTransaction>,
     p2p_block_sender: UnboundedSender<Block>,
@@ -49,9 +50,9 @@ pub async fn block_producer<DB: ChainDB>(
         // sample N txs from mempool
         let txs = &mempool[..TXS_PER_BLOCK].try_into()?;
 
-        // compute state transitions
         get_pinned!(db current_head => head_block);
 
+        // build potential block
         let (mut block_header, account_digests, new_accounts) =
             state_transition(head_block, txs, db.clone())?;
 
@@ -106,7 +107,7 @@ pub async fn block_producer<DB: ChainDB>(
             // check for new head (from p2p) everyonce in a while
             let head = fork_choice.lock().await.get_head().unwrap();
             if head != current_head {
-                info!("[break] new chain head: {:?} -> {:?}", current_head, head);
+                info!("[break] new chain head");
                 current_head = head;
                 break;
             }

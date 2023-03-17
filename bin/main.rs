@@ -67,8 +67,11 @@ pub fn main() -> Result<()> {
                 .unwrap()
         });
 
+        // todo: rpc thread
+
         // should never finish
-        tokio::join!(h1, h2);
+        h1.await.unwrap();
+        h2.await.unwrap();
     });
 
     Ok(())

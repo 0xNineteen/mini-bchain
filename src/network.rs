@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::Sha256Topic;
-use libp2p::{quic, dns, websocket, Transport};
+// use libp2p::{quic, dns, websocket, Transport};
 use libp2p::{
     gossipsub, identity, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
 };
@@ -24,12 +24,17 @@ pub const TRANSACTION_TOPIC: &str = "transactions";
 pub const BLOCK_TOPIC: &str = "blocks";
 pub const GOSSIP_CORE_TOPICS: [&str; 2] = [TRANSACTION_TOPIC, BLOCK_TOPIC];
 
+// todo: kalhmedia node lookup + non-local network
+// todo: improve blockpropogation -- solana's turbine/bittorrent
 #[derive(NetworkBehaviour)]
 pub struct ChainBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub mdns: mdns::async_io::Behaviour,
 }
 
+
+// todo: include a state s.t if pow fails this auto-stops
+// eg, use a shared (rwlock) enum Status::Failed(String)
 pub async fn network<DB: ChainDB>(
     p2p_tx_sender: UnboundedSender<SignedTransaction>,
     mut producer_block_reciever: UnboundedReceiver<Block>,
@@ -64,11 +69,9 @@ pub async fn network<DB: ChainDB>(
     //     let dns_quic = dns::DnsConfig::system(
     //         quic::async_std::Transport::new(quic_config)
     //     ).await?;
-
     //     let ws_dns_quic = websocket::WsConfig::new(
     //         dns_quic
     //     );
-
     //     dns_quic.boxed()
     // };
 

@@ -56,3 +56,88 @@ impl ForkChoice {
         self.heads.peek().cloned()
     }
 }
+
+#[cfg(test)]
+mod tests { 
+    use super::*; 
+
+    #[test]
+    pub fn test_genesis() { 
+        // a
+        // head = a
+        let genesis = BlockHeader::genesis(); 
+        let genesis_hash = genesis.compute_block_hash();
+
+        let fc = ForkChoice::new(genesis_hash); 
+
+        let head = fc.get_head().unwrap();
+        assert_eq!(head, genesis_hash);
+    }
+
+    #[test]
+    pub fn test_chain() { 
+        // a -> b 
+        // head = b
+        let genesis = BlockHeader::genesis(); 
+        let genesis_hash = genesis.compute_block_hash();
+
+        let mut fc = ForkChoice::new(genesis_hash); 
+
+        let mut bh = BlockHeader::default(); 
+        bh.parent_hash = genesis_hash;
+        let block_hash = bh.compute_block_hash();
+
+        fc.insert(block_hash, bh.parent_hash).unwrap();
+        
+        let head = fc.get_head().unwrap();
+        assert_eq!(head, block_hash);
+    }
+
+    #[test]
+    pub fn test_fork() { 
+        // a -> b -> c 
+        //   -> d
+        // head = c 
+
+        // a 
+        let genesis = BlockHeader::genesis(); 
+        let genesis_hash = genesis.compute_block_hash();
+        let mut fc = ForkChoice::new(genesis_hash); 
+
+        // b 
+        let mut bh = BlockHeader::default(); 
+        bh.parent_hash = genesis_hash;
+        let block_hash = bh.compute_block_hash();
+        fc.insert(block_hash, bh.parent_hash).unwrap();
+
+        // c
+        let mut bh = BlockHeader::default(); 
+        bh.parent_hash = block_hash;
+        let c_block_hash = bh.compute_block_hash();
+        fc.insert(c_block_hash, bh.parent_hash).unwrap();
+        
+        // d
+        let mut bh = BlockHeader::default(); 
+        bh.parent_hash = genesis_hash;
+        bh.nonce = 300; // different nonce = different hash 
+        fc.insert(bh.compute_block_hash(), bh.parent_hash).unwrap();
+
+        let head = fc.get_head().unwrap();
+        assert_eq!(head, c_block_hash);
+    }
+
+    #[test]
+    fn test_parent_not_found() { 
+        let genesis = BlockHeader::genesis(); 
+        let genesis_hash = genesis.compute_block_hash();
+        let mut fc = ForkChoice::new(genesis_hash); 
+
+        let bh = BlockHeader::default(); 
+        // note: parent hash not set = ZEROs
+        let block_hash = bh.compute_block_hash();
+        let result = fc.insert(block_hash, bh.parent_hash);
+
+        assert!(result.is_err());
+    }
+
+}

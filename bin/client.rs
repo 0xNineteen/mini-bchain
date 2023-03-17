@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::select;
 use tokio::time::interval;
 
-use tracing::info;
+use tracing::{info, debug};
 
 use mini_bchain::structures::*;
 use mini_bchain::network::*;
@@ -31,7 +31,7 @@ pub async fn main() -> Result<()> {
     let mut tick = interval(Duration::from_nanos(pubtime));
     info!("using pubtime {pubtime:?}");
 
-    let tps_tick_seconds = 2;
+    let tps_tick_seconds = 3;
     let mut tps_tick = interval(Duration::from_secs(tps_tick_seconds));
 
     let gossipsub = gossipsub::Behaviour::new(
@@ -81,9 +81,9 @@ pub async fn main() -> Result<()> {
                     .gossipsub
                     .publish(Sha256Topic::new(TRANSACTION_TOPIC), bytes);
 
-                // if let Err(e) = result {
-                //     info!("tx publish err: {e:?}");
-                // }
+                if let Err(e) = result {
+                    debug!("tx publish err: {e:?}");
+                }
             }, 
         }
     }
