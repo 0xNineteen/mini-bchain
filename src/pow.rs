@@ -10,7 +10,9 @@ use tracing::info;
 
 use crate::structures::*;
 use crate::fork_choice::*;
-use crate::state::*;
+use crate::machine::*;
+use crate::db::*;
+use crate::get_pinned;
 
 // todo: include a state s.t if the network fails this auto-stops
 pub async fn block_producer<DB: ChainDB>(

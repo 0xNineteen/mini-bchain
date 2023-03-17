@@ -10,8 +10,11 @@ a mini blockchain written in rust for learning purposes :)
 - `src/fork_choice.rs`: keeps track of the chain + its head
 - `src/network.rs`: libp2p gossip 
 - `src/pow.rs`: produces blocks by solving pow 
-- `src/state.rs`: manages chain state (process txs to get new state)
-- `src/lib.rs`: main node loop
+- `src/machine.rs`: state transition machine fcns (process txs to get new state)
+- `src/db.rs`: manages chain state
+
+- `bin/main.rs`: main node loop
+- `bin/client.rs`: main client loop (sending txs)
 
 ## architecture 
 

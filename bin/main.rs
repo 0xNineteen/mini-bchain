@@ -1,6 +1,6 @@
 use anyhow::Result;
-use mini_bchain::state::ChainDB;
-use mini_bchain::state::RocksDB;
+use mini_bchain::db::ChainDB;
+use mini_bchain::db::RocksDB;
 use rand::Rng;
 use rocksdb::DB;
 use std::sync::Arc;

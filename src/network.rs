@@ -17,8 +17,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::info;
 
 use crate::fork_choice::ForkChoice;
-use crate::state::*;
+use crate::machine::*;
 use crate::structures::*;
+
+use crate::db::*;
+use crate::get_pinned;
 
 pub const TRANSACTION_TOPIC: &str = "transactions";
 pub const BLOCK_TOPIC: &str = "blocks";
@@ -31,7 +34,6 @@ pub struct ChainBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub mdns: mdns::async_io::Behaviour,
 }
-
 
 // todo: include a state s.t if pow fails this auto-stops
 // eg, use a shared (rwlock) enum Status::Failed(String)
