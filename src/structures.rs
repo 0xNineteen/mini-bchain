@@ -12,7 +12,8 @@ pub type Sha256Bytes = [u8; HASH_BYTE_SIZE];
 pub type Key256Bytes = [u8; 32]; // public/private key
 pub type SignatureBytes = [u8; Signature::BYTE_SIZE];
 
-pub const TXS_PER_BLOCK: usize = 2048; // todo: make this dynamic ? 
+// pub const TXS_PER_BLOCK: usize = 2048; // todo: make this dynamic ? 
+pub const TXS_PER_BLOCK: usize = 2; // todo: make this dynamic ? 
 pub const POW_N_ZEROS: usize = 3; // note: needs to be > 0
 pub const POW_LEN_ZEROS: usize = POW_N_ZEROS - 1;
 
@@ -57,7 +58,7 @@ impl ChainDigest for AccountDigests {
 
 /* TRANSACTION STRUCTS */
 #[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone)]
+#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone, Default)]
 pub struct Transaction {
     pub address: Key256Bytes,
     pub amount: u128,
@@ -69,6 +70,16 @@ pub struct SignedTransaction {
     pub transaction: Transaction,
     pub signature: SignatureBytes,
 }
+
+impl Default for SignedTransaction { 
+    fn default() -> Self {
+        SignedTransaction { 
+            transaction: Transaction::default(), 
+            signature: [0; Signature::BYTE_SIZE]
+        }
+    }
+}
+
 
 impl ChainDigest for Transaction {
     fn digest(&self) -> Sha256Bytes {
@@ -114,6 +125,12 @@ impl ChainDigest for Transactions {
     }
 }
 
+impl Default for Transactions { 
+    fn default() -> Self {
+        Transactions([SignedTransaction::default(); TXS_PER_BLOCK])
+    }
+}
+
 /* BLOCK STRUCTS */
 #[repr(C)]
 #[derive(Pod, Zeroable, Copy, Debug, Default, Clone)]
@@ -141,9 +158,7 @@ pub struct Block {
 impl Block {
     pub fn genesis() -> Self {
         let header = BlockHeader::genesis();
-        let txs = Transactions([
-            SignedTransaction::zeroed(); TXS_PER_BLOCK
-        ]);
+        let txs = Transactions::default();
         Block { header, txs }
     }
 }

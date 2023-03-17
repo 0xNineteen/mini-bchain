@@ -16,7 +16,6 @@ use mini_bchain::pow::*;
 use mini_bchain::structures::*;
 use mini_bchain::fork_choice::ForkChoice;
 
-
 pub fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
@@ -34,20 +33,8 @@ pub fn main() -> Result<()> {
         let (p2p_tx_sender, p2p_tx_reciever) = unbounded_channel(); // p2p => producer
         let (producer_block_sender, producer_block_reciever) = unbounded_channel(); // producer => p2p
 
-        // init genesis + database
-        let mut genesis = Block::genesis();
-        let genesis_hash = genesis.header.block_hash;
-        info!("genisis hash: {:x?}", genesis_hash);
-
-        let account_digests = AccountDigests(vec![]);
-        let state_root = account_digests.digest();
-        genesis.header.state_root = state_root;
-        
-        db.put_vec(&account_digests).unwrap();
-        db.put(&genesis).unwrap();
-
         // setup fork choice with genesis
-        let fork_choice = ForkChoice::new(genesis_hash);
+        let fork_choice = db.insert_genesis().unwrap();
         let fork_choice = Arc::new(Mutex::new(fork_choice));
 
         // begin
