@@ -1,7 +1,7 @@
 use std::ops::Deref;
 use std::sync::Arc;
 use std::vec;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::Sha256Topic;
@@ -119,42 +119,11 @@ pub async fn network<DB: ChainDB>(
                     }
                     match bytemuck::try_from_bytes::<Block>(data) {
                         Ok(block) => {
-                            let parent_hash = block.header.parent_hash;
-                            get_pinned!(db parent_hash => parent_block);
-
-                            // multithread sigverify
-                            let txs = &block.txs.0;
-                            let result = txs.par_iter().find_any(|tx| tx.verify().is_err());
-                            if result.is_some() { 
-                                info!("block tx sig verification failed...");
-                                continue;
-                            }
-
-                            // re-produce the state change
-                            let (
-                                mut block_header,
-                                account_digests,
-                                new_accounts
-                            ) = state_transition(parent_block, txs, db.clone())?;
-                            block_header.nonce = block.header.nonce;
-                            block_header.commit_block_hash();
-
-                            // verify final block
-                            let verification = {
-                                block_header.block_hash == block.header.block_hash &&
-                                block_header.state_root == block.header.state_root &&
-                                block_header.tx_root == block.header.tx_root &&
-                                block_header.is_valid_pow()
-                            };
-                            if !verification {
-                                info!("block verification failed...");
-                                continue;
-                            }
-                            info!("block verification passed...");
-
-                            // store new block's state
-                            // todo: move behind forkchoice? 
-                            commit_new_block(&block, account_digests, new_accounts, fork_choice.clone(), db.clone()).await?;
+                            process_network_block(
+                                block, 
+                                db.clone(), 
+                                fork_choice.clone()
+                            ).await?;
                         },
                         Err(_) => {
                             info!("serialization failed...");
@@ -166,3 +135,48 @@ pub async fn network<DB: ChainDB>(
         }
     }
 }
+
+pub async fn process_network_block<DB: ChainDB>(
+    block: &Block, 
+    db: Arc<DB>, 
+    fork_choice: Arc<Mutex<ForkChoice>>,
+) -> Result<()> { 
+    let parent_hash = block.header.parent_hash;
+    get_pinned!(db parent_hash => parent_block);
+
+    // multithread sigverify
+    let txs = &block.txs.0;
+    let result = txs.par_iter().find_any(|tx| tx.verify().is_err());
+    if result.is_some() { 
+        return Err(anyhow!("block tx sig verification failed..."));
+    }
+
+    // re-produce the state change
+    let (
+        mut block_header,
+        account_digests,
+        new_accounts
+    ) = state_transition(parent_block, txs, db.clone())?;
+    block_header.nonce = block.header.nonce;
+    block_header.commit_block_hash();
+
+    // verify final block
+    let verification = {
+        block_header.block_hash == block.header.block_hash &&
+        block_header.state_root == block.header.state_root &&
+        block_header.tx_root == block.header.tx_root &&
+        block_header.is_valid_pow()
+    };
+    if !verification {
+        return Err(anyhow!("block verification failed..."));
+    }
+    info!("block verification passed...");
+
+    // store new block's state
+    // todo: move behind forkchoice? 
+    commit_new_block(&block, account_digests, new_accounts, fork_choice.clone(), db.clone()).await?;
+
+    Ok(())
+}
+
+
