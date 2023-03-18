@@ -77,7 +77,7 @@ pub async fn block_producer(
                     header: block_header,
                     txs,
                 };
-                p2p_block_sender.send(block.clone())?;
+                p2p_block_sender.send(block)?;
 
                 // update state
                 commit_new_block(

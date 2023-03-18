@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use anyhow::{Result, anyhow};
+use anyhow::{Result};
 use bytemuck::Zeroable;
 use tokio::sync::Mutex;
 use tracing::info;

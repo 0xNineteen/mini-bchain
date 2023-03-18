@@ -107,16 +107,14 @@ pub async fn network(
                  })) => {
                     let data = message.data.as_slice();
 
-                    match bytemuck::try_from_bytes::<SignedTransaction>(data) {
-                        Ok(tx) => {
-                            // send to mempool
-                            if tx.verify().is_ok() { 
-                                p2p_tx_sender.send(*tx)?; // clone :(
-                            }
-                            continue;
-                        },
-                        Err(_) => {}
+                    if let Ok(tx) = bytemuck::try_from_bytes::<SignedTransaction>(data) {
+                        // send to mempool
+                        if tx.verify().is_ok() { 
+                            p2p_tx_sender.send(*tx)?; // clone :(
+                        }
+                        continue;
                     }
+
                     match bytemuck::try_from_bytes::<Block>(data) {
                         Ok(block) => {
                             process_network_block(
@@ -174,7 +172,7 @@ pub async fn process_network_block(
 
     // store new block's state
     // todo: move behind forkchoice? 
-    commit_new_block(&block, account_digests, new_accounts, fork_choice.clone(), db.clone()).await?;
+    commit_new_block(block, account_digests, new_accounts, fork_choice.clone(), db.clone()).await?;
 
     Ok(())
 }
