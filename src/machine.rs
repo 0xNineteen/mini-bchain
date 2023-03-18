@@ -9,10 +9,10 @@ use crate::fork_choice::ForkChoice;
 use crate::db::*;
 
 // todo: use hash tree lookup (eth full optimized)
-pub fn state_transition<DB: ChainDB>(
+pub fn state_transition(
     parent_block: &Block,
     txs: &[SignedTransaction; TXS_PER_BLOCK],
-    db: Arc<DB>,
+    db: Arc<RocksDB>,
 ) -> Result<(BlockHeader, AccountDigests, Vec<Account>)> {
     let state_root = parent_block.header.state_root;
     let mut account_digests = db.get_vec::<AccountDigests>(state_root)?.0;
@@ -69,12 +69,12 @@ pub fn state_transition<DB: ChainDB>(
     Ok((block_header, account_digests, new_accounts))
 }
 
-pub async fn commit_new_block<T: ChainDB>(
+pub async fn commit_new_block(
     block: &Block,
     account_digests: AccountDigests,
     new_accounts: Vec<Account>,
     fork_choice: Arc<Mutex<ForkChoice>>,
-    db: Arc<T>,
+    db: Arc<RocksDB>,
 ) -> Result<()> {
 
     for account in new_accounts {

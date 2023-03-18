@@ -6,11 +6,37 @@ use sha2::{Digest, Sha256};
 use anyhow::Result;
 
 use bytemuck::{Pod, Zeroable, bytes_of};
+use serde::{Serialize, Deserialize, Deserializer}; 
+use serde_bytes;
 
 pub const HASH_BYTE_SIZE: usize = 32;
 pub type Sha256Bytes = [u8; HASH_BYTE_SIZE];
 pub type Key256Bytes = [u8; 32]; // public/private key
-pub type SignatureBytes = [u8; Signature::BYTE_SIZE];
+
+#[repr(C)]
+#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone)]
+pub struct SignatureBytes([u8; Signature::BYTE_SIZE]);
+
+impl Serialize for SignatureBytes { 
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SignatureBytes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where D: Deserializer<'de>
+    {
+        let bytes: Vec<u8> = serde_bytes::deserialize(deserializer)?;
+        let mut array = [0u8; Signature::BYTE_SIZE];
+        array.copy_from_slice(&bytes);
+        Ok(SignatureBytes(array))
+    }
+}
+
+
 
 // pub const TXS_PER_BLOCK: usize = 2048; // todo: make this dynamic ? 
 pub const TXS_PER_BLOCK: usize = 2; // todo: make this dynamic ? 
@@ -58,14 +84,14 @@ impl ChainDigest for AccountDigests {
 
 /* TRANSACTION STRUCTS */
 #[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone, Default)]
+#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
 pub struct Transaction {
     pub address: Key256Bytes,
     pub amount: u128,
 }
 
 #[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone)]
+#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct SignedTransaction {
     pub transaction: Transaction,
     pub signature: SignatureBytes,
@@ -75,7 +101,7 @@ impl Default for SignedTransaction {
     fn default() -> Self {
         SignedTransaction { 
             transaction: Transaction::default(), 
-            signature: [0; Signature::BYTE_SIZE]
+            signature: SignatureBytes([0; Signature::BYTE_SIZE])
         }
     }
 }
@@ -98,7 +124,7 @@ impl Transaction {
         let sig_bytes = sig.to_bytes();
         SignedTransaction {
             transaction: self,
-            signature: sig_bytes,
+            signature: SignatureBytes(sig_bytes),
         }
     }
 }
@@ -107,13 +133,13 @@ impl SignedTransaction {
     pub fn verify(&self) -> Result<(), SignatureError> {
         let digest = self.transaction.digest();
         let publickey = PublicKey::from_bytes(self.transaction.address.as_slice())?;
-        let sig = Signature::from_bytes(self.signature.as_slice())?;
+        let sig = Signature::from_bytes(self.signature.0.as_slice())?;
         publickey.verify(digest.as_slice(), &sig)
     }
 }
 
 #[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, Clone)]
+#[derive(Pod, Zeroable, Copy, Debug, Clone, Serialize, Deserialize)]
 pub struct Transactions(pub [SignedTransaction; TXS_PER_BLOCK]);
 
 impl ChainDigest for Transactions {
@@ -132,8 +158,10 @@ impl Default for Transactions {
 }
 
 /* BLOCK STRUCTS */
+// we use serde for rpc 
+
 #[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, Default, Clone)]
+#[derive(Pod, Zeroable, Copy, Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
     pub parent_hash: Sha256Bytes,
     pub state_root: Sha256Bytes,
@@ -149,11 +177,21 @@ impl ChainDigest for BlockHeader {
 }
 
 #[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, Clone)]
+#[derive(Pod, Zeroable, Copy, Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
     pub txs: Transactions,
 }
+
+
+// impl Serialize for Block {  
+//     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+//         where
+//             S: serde::Serializer {
+        
+//     }
+// }
+
 
 impl Block {
     pub fn genesis() -> Self {

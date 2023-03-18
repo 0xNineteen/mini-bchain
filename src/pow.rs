@@ -15,11 +15,11 @@ use crate::db::*;
 use crate::get_pinned;
 
 // todo: include a state s.t if the network fails this auto-stops
-pub async fn block_producer<DB: ChainDB>(
+pub async fn block_producer(
     mut p2p_tx_reciever: UnboundedReceiver<SignedTransaction>,
     p2p_block_sender: UnboundedSender<Block>,
     fork_choice: Arc<Mutex<ForkChoice>>,
-    db: Arc<DB>,
+    db: Arc<RocksDB>,
 ) -> Result<()> {
     let mut mempool = vec![];
     let mut current_head = fork_choice.lock().await.get_head().unwrap();
@@ -57,17 +57,6 @@ pub async fn block_producer<DB: ChainDB>(
         // build potential block
         let (mut block_header, account_digests, new_accounts) =
             state_transition(head_block, txs, db.clone())?;
-
-        pub fn pow_loop(block_header: &mut BlockHeader, n_loops: usize) -> bool {
-            for _ in 0..n_loops {
-                if block_header.is_valid_pow() {
-                    block_header.commit_block_hash(); // save it
-                    return true;
-                }
-                block_header.nonce += 1;
-            }
-            false
-        }
 
         info!("running POW loop...");
         // if success => { insert in DB + send to p2p to broadcast }
@@ -115,4 +104,15 @@ pub async fn block_producer<DB: ChainDB>(
             }
         }
     }
+}
+
+pub fn pow_loop(block_header: &mut BlockHeader, n_loops: usize) -> bool {
+    for _ in 0..n_loops {
+        if block_header.is_valid_pow() {
+            block_header.commit_block_hash(); // save it
+            return true;
+        }
+        block_header.nonce += 1;
+    }
+    false
 }

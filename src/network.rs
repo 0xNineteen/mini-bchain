@@ -37,11 +37,11 @@ pub struct ChainBehaviour {
 
 // todo: include a state s.t if pow fails this auto-stops
 // eg, use a shared (rwlock) enum Status::Failed(String)
-pub async fn network<DB: ChainDB>(
+pub async fn network(
     p2p_tx_sender: UnboundedSender<SignedTransaction>,
     mut producer_block_reciever: UnboundedReceiver<Block>,
     fork_choice: Arc<Mutex<ForkChoice>>,
-    db: Arc<DB>,
+    db: Arc<RocksDB>,
 ) -> Result<()> {
     // Create a random PeerId
     let local_key = identity::Keypair::generate_ed25519();
@@ -136,9 +136,9 @@ pub async fn network<DB: ChainDB>(
     }
 }
 
-pub async fn process_network_block<DB: ChainDB>(
+pub async fn process_network_block(
     block: &Block, 
-    db: Arc<DB>, 
+    db: Arc<RocksDB>, 
     fork_choice: Arc<Mutex<ForkChoice>>,
 ) -> Result<()> { 
     let parent_hash = block.header.parent_hash;

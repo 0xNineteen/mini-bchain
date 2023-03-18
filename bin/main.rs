@@ -1,10 +1,8 @@
 use anyhow::Result;
-use mini_bchain::db::ChainDB;
 use mini_bchain::db::RocksDB;
 use rand::Rng;
 use rocksdb::DB;
 use std::sync::Arc;
-use std::vec;
 
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::unbounded_channel;
@@ -13,8 +11,6 @@ use tracing::{info, Instrument};
 
 use mini_bchain::network::*;
 use mini_bchain::pow::*;
-use mini_bchain::structures::*;
-use mini_bchain::fork_choice::ForkChoice;
 
 pub fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
