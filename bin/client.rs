@@ -41,10 +41,7 @@ pub async fn main() -> Result<()> {
     // server address 
     let server_addr = SocketAddr::from_str("[::1]:8888")?;
     let transport = tarpc::serde_transport::tcp::connect(server_addr, Json::default);
-
     let client = RPCClient::new(Config::default(), transport.await?).spawn();
-
-
 
     let tps_tick_seconds = 3;
     let mut tps_tick = interval(Duration::from_secs(tps_tick_seconds));
