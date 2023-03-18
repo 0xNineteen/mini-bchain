@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ed25519_dalek::Keypair;
+use mini_bchain::rpc::RPCClient;
 use rand::rngs::OsRng;
 
 use libp2p::futures::StreamExt;
@@ -7,7 +8,12 @@ use libp2p::gossipsub::Sha256Topic;
 use libp2p::{
     gossipsub, identity, mdns, swarm::SwarmEvent, PeerId, Swarm,
 };
+use tarpc::client::Config;
+use tarpc::context;
+use tarpc::tokio_serde::formats::Json;
 
+use std::net::SocketAddr;
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::select;
 use tokio::time::interval;
@@ -27,9 +33,18 @@ pub async fn main() -> Result<()> {
     info!("Local peer id: {local_peer_id}");
 
     // let pubtime = rand::thread_rng().gen_range(5, 10);
-    let pubtime = 1;
-    let mut tick = interval(Duration::from_nanos(pubtime));
+    // let pubtime = Duration::from_nanos(1);
+    let pubtime = Duration::from_secs(5);
+    let mut tick = interval(pubtime);
     info!("using pubtime {pubtime:?}");
+
+    // server address 
+    let server_addr = SocketAddr::from_str("[::1]:8888")?;
+    let transport = tarpc::serde_transport::tcp::connect(server_addr, Json::default);
+
+    let client = RPCClient::new(Config::default(), transport.await?).spawn();
+
+
 
     let tps_tick_seconds = 3;
     let mut tps_tick = interval(Duration::from_secs(tps_tick_seconds));
@@ -63,6 +78,10 @@ pub async fn main() -> Result<()> {
             _ = tps_tick.tick() => { 
                 info!("tps: {}", counter / tps_tick_seconds as u128);
                 counter = 0;
+
+                let hash = client.get_head(context::current()).await?.unwrap();
+                let block = client.get_block(context::current(), hash).await?;
+                info!("got block: {:x?}", block.unwrap().header.block_hash);
             },
             _ = tick.tick() => {
                 counter += 1;
