@@ -1,4 +1,4 @@
-use std::{sync::{Arc}, net::{SocketAddr}, collections::{HashMap, hash_map::Iter}, str::FromStr};
+use std::{collections::{HashMap, hash_map::Iter}};
 use libp2p::{PeerId};
 use tracing::info;
 

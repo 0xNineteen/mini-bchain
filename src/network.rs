@@ -5,10 +5,10 @@ use anyhow::{Result, anyhow};
 
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::Sha256Topic;
-use libp2p::identity::Keypair;
+
 // use libp2p::{quic, dns, websocket, Transport};
 use libp2p::{
-    gossipsub, identity, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
+    gossipsub, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
 };
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use tarpc::context;
