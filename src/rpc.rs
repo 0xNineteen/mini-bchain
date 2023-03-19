@@ -2,7 +2,7 @@ use std::{sync::{Arc}, net::{SocketAddr}, collections::{HashMap, hash_map::Iter}
 use libp2p::{PeerId};
 use tokio::sync::Mutex;
 
-use tarpc::{context::{Context, self}, tokio_serde::formats::Json, server::incoming::Incoming, client::Config};
+use tarpc::{context::{Context, self}, tokio_serde::formats::Json, client::Config};
 use tracing::info;
 
 use crate::{structures::{Sha256Bytes, Block}, db::{RocksDB}, fork_choice::ForkChoice, machine::ChainState};
@@ -154,6 +154,7 @@ impl PeerManager {
 #[cfg(test)] 
 mod tests { 
     use std::sync::Arc;
+    use libp2p::identity;
     use tarpc::{server::{self, Channel}, client::Config, context};
     use crate::{get_tmp_ledger_path_auto_delete, db::RocksDB};
     use rocksdb::DB;
@@ -188,17 +189,21 @@ mod tests {
         });
 
         let client = RPCClient::new(Config::default(), client_transport).spawn();
-
-        let block = client.get_block(context::current(), genesis.header.block_hash).await?;
-        assert!(block.is_none());
-
-        // block is now in db (should be rpc servable)
-        db.put(&genesis)?;
-
+        
+        // block exists
         let block = client.get_block(context::current(), genesis.header.block_hash).await?;
         assert!(block.is_some());
         let rpc_block = block.unwrap(); 
         assert_eq!(rpc_block.header.block_hash, genesis.header.block_hash);
+
+
+        // block dne
+        let mut new_block = Block::genesis();
+        new_block.header.nonce = 10; 
+        new_block.header.commit_block_hash();
+
+        let block = client.get_block(context::current(), new_block.header.block_hash).await?;
+        assert!(block.is_none());
 
         Ok(())
     }
