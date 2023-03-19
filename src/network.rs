@@ -49,7 +49,6 @@ pub async fn network(
 ) -> Result<()> {
     // Create a random PeerId
     let local_peer_id = PeerId::from(local_key.public());
-    info!("Local peer id: {local_peer_id}");
 
     let mut gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),

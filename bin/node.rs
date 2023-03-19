@@ -76,9 +76,9 @@ pub fn main() -> Result<()> {
         });
 
         // should never finish
+        h3.await.unwrap();
         h1.await.unwrap();
         h2.await.unwrap();
-        h3.await.unwrap();
     });
 
     Ok(())
