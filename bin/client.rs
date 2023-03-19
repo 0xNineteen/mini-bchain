@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Result};
 use ed25519_dalek::Keypair;
 use rand::rngs::OsRng;
 

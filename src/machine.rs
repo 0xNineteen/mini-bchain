@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use anyhow::{Result};
 use bytemuck::Zeroable;
-use libp2p::PeerId;
+
 use libp2p::identity::Keypair;
 use tokio::sync::Mutex;
 use tracing::info;

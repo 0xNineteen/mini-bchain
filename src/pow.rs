@@ -1,17 +1,17 @@
 use std::ops::Deref;
-use std::sync::Arc;
+
 use std::vec;
 use anyhow::Result;
 use std::time::Duration;
-use tokio::sync::Mutex;
+
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::sleep;
 use tracing::info;
 
 use crate::structures::*;
-use crate::fork_choice::*;
+
 use crate::machine::*;
-use crate::db::*;
+
 use crate::get_pinned;
 
 // todo: include a state s.t if the network fails this auto-stops
