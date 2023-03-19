@@ -180,7 +180,6 @@ mod tests {
         };
 
         let genesis = Block::genesis(); 
-        // no db insertion
 
         let (client_transport, server_transport) = tarpc::transport::channel::unbounded();
         let server = server::BaseChannel::with_defaults(server_transport);
