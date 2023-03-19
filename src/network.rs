@@ -5,10 +5,10 @@ use anyhow::{Result, anyhow};
 
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::Sha256Topic;
-
+use libp2p::identity::Keypair;
 // use libp2p::{quic, dns, websocket, Transport};
 use libp2p::{
-    gossipsub, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
+    gossipsub, identity, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
 };
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use tarpc::context;
@@ -22,7 +22,7 @@ use crate::fork_choice::ForkChoice;
 use crate::machine::*;
 use crate::structures::*;
 
-use crate::rpc::*;
+use crate::peer_manager::*;
 use crate::db::*;
 use crate::get_pinned;
 
@@ -67,19 +67,8 @@ pub async fn network(
     let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
     let behaviour = ChainBehaviour { gossipsub, mdns };
 
+    // todo: use quicc
     let transport = libp2p::development_transport(keypair.clone()).await?;
-
-    // // todo: get quicc working 
-    // let transport = {
-    //     let quic_config = quic::Config::new(&local_key);
-    //     let dns_quic = dns::DnsConfig::system(
-    //         quic::async_std::Transport::new(quic_config)
-    //     ).await?;
-    //     let ws_dns_quic = websocket::WsConfig::new(
-    //         dns_quic
-    //     );
-    //     dns_quic.boxed()
-    // };
 
     let mut swarm = Swarm::with_threadpool_executor(transport, behaviour, local_peer_id);
     let multi_addr = "/ip4/0.0.0.0/tcp/0".parse()?; 

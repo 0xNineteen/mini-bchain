@@ -17,7 +17,7 @@ use tracing::{info, debug};
 
 use mini_bchain::structures::*;
 use mini_bchain::network::*;
-use mini_bchain::rpc::*;
+use mini_bchain::peer_manager::*;
 
 #[tokio::main]
 pub async fn main() -> Result<()> { 

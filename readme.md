@@ -12,8 +12,10 @@ a mini blockchain written in rust for learning purposes :)
 - `src/pow.rs`: produces blocks by solving pow 
 - `src/machine.rs`: state transition machine fcns (process txs to get new state)
 - `src/db.rs`: manages chain state
+- `src/rpc.rs`: manages the rpc api for the node
+- `src/peer_manager.rs`: manages the peers connected through Mdns and stores their RPC client
 
-- `bin/main.rs`: main node loop
+- `bin/node.rs`: main node loop
 - `bin/client.rs`: main client loop (sending txs)
 
 ## architecture 
@@ -24,7 +26,7 @@ a mini blockchain written in rust for learning purposes :)
 - `src/pow.rs`
   - grabs transactions from its mempool
   - gets head of chain from `ForkChoice`
-  - processes them to get a new state (`src/state.rs`)
+  - processes them to get a new state (`src/machine.rs`)
   - do POW loop until block is solved 
     - if solved send block to `ForkChoice` to update chain/head and `P2P` to gossip to other nodes
     - periodically check `ForkChoice` for a new head
