@@ -43,15 +43,18 @@ pub struct ChainBehaviour {
 pub async fn network(
     p2p_tx_sender: UnboundedSender<SignedTransaction>,
     mut producer_block_reciever: UnboundedReceiver<Block>,
-    local_key: Keypair,
-    fork_choice: Arc<Mutex<ForkChoice>>,
-    db: Arc<RocksDB>,
+    chain_state: ChainState, 
 ) -> Result<()> {
-    // Create a random PeerId
-    let local_peer_id = PeerId::from(local_key.public());
+    let ChainState {
+        fork_choice, 
+        db, 
+        keypair
+    } = chain_state; 
+
+    let local_peer_id = PeerId::from(keypair.public());
 
     let mut gossipsub = gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(local_key.clone()),
+        gossipsub::MessageAuthenticity::Signed(keypair.clone()),
         gossipsub::Config::default(),
     )
     .unwrap();
@@ -64,7 +67,7 @@ pub async fn network(
     let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
     let behaviour = ChainBehaviour { gossipsub, mdns };
 
-    let transport = libp2p::development_transport(local_key.clone()).await?;
+    let transport = libp2p::development_transport(keypair.clone()).await?;
 
     // // todo: get quicc working 
     // let transport = {

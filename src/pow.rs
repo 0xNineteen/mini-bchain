@@ -18,9 +18,14 @@ use crate::get_pinned;
 pub async fn block_producer(
     mut p2p_tx_reciever: UnboundedReceiver<SignedTransaction>,
     p2p_block_sender: UnboundedSender<Block>,
-    fork_choice: Arc<Mutex<ForkChoice>>,
-    db: Arc<RocksDB>,
+    chain_state: ChainState, 
 ) -> Result<()> {
+    let ChainState {
+        fork_choice, 
+        db, 
+        ..
+    } = chain_state; 
+
     let mut mempool = vec![];
     let mut current_head = fork_choice.lock().await.get_head().unwrap();
 

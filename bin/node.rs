@@ -1,6 +1,8 @@
 use anyhow::Result;
+use libp2p::PeerId;
 use libp2p::identity;
 use mini_bchain::db::RocksDB;
+use mini_bchain::machine::ChainState;
 use mini_bchain::rpc::rpc;
 use rand::Rng;
 use rocksdb::DB;
@@ -26,7 +28,11 @@ pub fn main() -> Result<()> {
         .init();
 
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+
+    // init p2p key
     let keypair = identity::Keypair::generate_ed25519();
+    let peer_id = PeerId::from(keypair.public());
+    info!("Local peer id: {peer_id}");
 
     // init db
     let id = rand::thread_rng().gen_range(0, 100);
@@ -41,35 +47,36 @@ pub fn main() -> Result<()> {
     let fork_choice = db.insert_genesis().unwrap();
     let fork_choice = Arc::new(Mutex::new(fork_choice));
 
+    let chain_state = ChainState { 
+        db, 
+        fork_choice, 
+        keypair
+    };
+
     runtime.block_on(async move {
         let (p2p_tx_sender, p2p_tx_reciever) = unbounded_channel(); // p2p => producer
         let (producer_block_sender, producer_block_reciever) = unbounded_channel(); // producer => p2p
 
         // begin
-        let fc_ = fork_choice.clone();
-        let db_ = db.clone();
+        let state_ = chain_state.clone();
         let h1 = tokio::spawn(async move {
-            block_producer(p2p_tx_reciever, producer_block_sender, fc_, db_)
+            block_producer(p2p_tx_reciever, producer_block_sender, state_)
                 .instrument(tracing::info_span!("block producer"))
                 .await
                 .unwrap()
         });
 
-        let fc_ = fork_choice.clone();
-        let db_ = db.clone();
-        let kp_ = keypair.clone();
+        let state_ = chain_state.clone();
         let h2 = tokio::spawn(async move {
-            network(p2p_tx_sender, producer_block_reciever, kp_, fc_, db_)
+            network(p2p_tx_sender, producer_block_reciever, state_)
                 .instrument(tracing::info_span!("network"))
                 .await
                 .unwrap()
         });
 
-        let fc_ = fork_choice.clone();
-        let db_ = db.clone();
-        let kp_ = keypair.clone();
+        let state_ = chain_state.clone();
         let h3 = tokio::spawn(async move { 
-            rpc(db_, fc_, kp_)
+            rpc(state_)
                 .instrument(tracing::info_span!("rpc"))
                 .await
                 .unwrap()

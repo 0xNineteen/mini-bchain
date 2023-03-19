@@ -37,7 +37,6 @@ impl<'de> Deserialize<'de> for SignatureBytes {
 }
 
 
-
 // pub const TXS_PER_BLOCK: usize = 2048; // todo: make this dynamic ? 
 pub const TXS_PER_BLOCK: usize = 2; // todo: make this dynamic ? 
 pub const POW_N_ZEROS: usize = 3; // note: needs to be > 0

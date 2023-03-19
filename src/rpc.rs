@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use tarpc::{context::{Context, self}, tokio_serde::formats::Json, server::incoming::Incoming, client::Config};
 use tracing::info;
 
-use crate::{structures::{Sha256Bytes, Block}, db::{RocksDB}, fork_choice::ForkChoice};
+use crate::{structures::{Sha256Bytes, Block}, db::{RocksDB}, fork_choice::ForkChoice, machine::ChainState};
 use tarpc::{server::{self, Channel}};
 use futures::{future, prelude::*};
 use anyhow::anyhow;
@@ -48,12 +48,16 @@ impl RPC for Server {
     // 2) need unique port for the rpc
 
 pub async fn rpc(
-    db: Arc<RocksDB>,
-    fork_choice: Arc<Mutex<ForkChoice>>,
-    keypair: Keypair,
-) -> anyhow::Result<()> { 
+    chain_state: ChainState, 
+) -> anyhow::Result<()> {
+
+    let ChainState {
+        fork_choice, 
+        db, 
+        keypair
+    } = chain_state; 
+
     let local_peer_id = PeerId::from(keypair.public());
-    info!("Local peer id: {local_peer_id}");
 
     let _server = Server { 
         db,
@@ -84,8 +88,7 @@ pub async fn rpc(
             let server = _server.clone();
             channel.execute(server.serve())
         })
-        // Max 10 channels.
-        .buffer_unordered(10)
+        .buffer_unordered(100)
         .for_each(|_| async {})
         .await;
 

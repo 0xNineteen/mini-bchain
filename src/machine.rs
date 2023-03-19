@@ -1,12 +1,21 @@
 use std::sync::Arc;
 use anyhow::{Result};
 use bytemuck::Zeroable;
+use libp2p::PeerId;
+use libp2p::identity::Keypair;
 use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::structures::*;
 use crate::fork_choice::ForkChoice;
 use crate::db::*;
+
+#[derive(Clone)]
+pub struct ChainState { 
+    pub fork_choice: Arc<Mutex<ForkChoice>>, 
+    pub db: Arc<RocksDB>, 
+    pub keypair: Keypair,
+}
 
 // todo: use hash tree lookup (eth full optimized)
 pub fn state_transition(
