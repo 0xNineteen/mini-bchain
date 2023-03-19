@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::Sha256Topic;
+use libp2p::identity::Keypair;
 // use libp2p::{quic, dns, websocket, Transport};
 use libp2p::{
     gossipsub, identity, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
@@ -40,13 +41,12 @@ pub struct ChainBehaviour {
 pub async fn network(
     p2p_tx_sender: UnboundedSender<SignedTransaction>,
     mut producer_block_reciever: UnboundedReceiver<Block>,
+    local_key: Keypair,
     fork_choice: Arc<Mutex<ForkChoice>>,
     db: Arc<RocksDB>,
 ) -> Result<()> {
     // Create a random PeerId
-    let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
-    info!("Local peer id: {local_peer_id}");
 
     let mut gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
@@ -62,7 +62,6 @@ pub async fn network(
     let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
     let behaviour = ChainBehaviour { gossipsub, mdns };
 
-    // // Set up an encrypted DNS-enabled TCP Transport over the Mplex protocol.
     let transport = libp2p::development_transport(local_key.clone()).await?;
 
     // // todo: get quicc working 
@@ -78,7 +77,8 @@ pub async fn network(
     // };
 
     let mut swarm = Swarm::with_threadpool_executor(transport, behaviour, local_peer_id);
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    let multi_addr = "/ip4/0.0.0.0/tcp/0".parse()?; 
+    swarm.listen_on(multi_addr)?;
 
     loop {
         select! {
@@ -97,7 +97,6 @@ pub async fn network(
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(ChainBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
-                        info!("mDNS discovered a new peer: {peer_id}");
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                     }
                 },

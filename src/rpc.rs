@@ -1,11 +1,12 @@
 use std::{sync::{Arc}, net::{IpAddr, Ipv6Addr}};
+use libp2p::{PeerId, identity::{self, Keypair}};
 use tokio::sync::Mutex;
 
 use tarpc::{context::Context, tokio_serde::formats::Json, server::incoming::Incoming};
 use tracing::info;
 
 use crate::{structures::{Sha256Bytes, Block}, db::{RocksDB}, fork_choice::ForkChoice};
-use tarpc::{server::{self, Channel}, client::Config, context};
+use tarpc::{server::{self, Channel}};
 use futures::{future, prelude::*};
 
 // todo: change to use bytemuck Codec (not json/serde)
@@ -13,12 +14,15 @@ use futures::{future, prelude::*};
 pub trait RPC { 
     async fn get_block(hash: Sha256Bytes) -> Option<Block>;
     async fn get_head() -> Option<Sha256Bytes>;
+    // used to find localnodes
+    async fn get_peer_id() -> PeerId;
 }
 
 #[derive(Clone)]
 struct Server { 
     db: Arc<RocksDB>,
     fork_choice: Arc<Mutex<ForkChoice>>,
+    peer_id: PeerId
 }
 
 #[tarpc::server]
@@ -30,23 +34,40 @@ impl RPC for Server {
     async fn get_head(self, _: Context) -> Option<Sha256Bytes> { 
         self.fork_choice.lock().await.get_head() // safe to unwrap here
     }
+
+    async fn get_peer_id(self, _: Context) -> PeerId { 
+        self.peer_id
+    }
 }
+
+// problem: need 
+    // 1) unique port/ip address for each node on gossipsub
+    // 2) need unique port for the rpc
 
 pub async fn rpc(
     db: Arc<RocksDB>,
     fork_choice: Arc<Mutex<ForkChoice>>,
-    port: u16,
+    mut port: u16,
+    keypair: Keypair,
 ) -> anyhow::Result<()> { 
+    let local_peer_id = PeerId::from(keypair.public());
+
     let _server = Server { 
         db,
         fork_choice,
+        peer_id: local_peer_id
     };
 
-    let server_addr = (IpAddr::V6(Ipv6Addr::LOCALHOST), port);
-
-    // JSON transport is provided by the json_transport tarpc module. It makes it easy
-    // to start up a serde-powered json serialization strategy over TCP.
-    let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?;
+    let mut listener;
+    loop { 
+        let server_addr = (IpAddr::V6(Ipv6Addr::LOCALHOST), port);
+        listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await;
+        if listener.is_ok() { 
+            break; 
+        } 
+        port += 1;
+    }
+    let mut listener = listener.unwrap();
     info!("Listening on {}", listener.local_addr());
 
     listener.config_mut().max_frame_length(usize::MAX);
@@ -82,6 +103,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_lookup() -> anyhow::Result<()> { 
+        let keypair = identity::Keypair::generate_ed25519();
+        let local_peer_id = PeerId::from(keypair.public());
+
         let path = get_tmp_ledger_path_auto_delete!();
         let db = DB::open_default(path).unwrap();
         let db = Arc::new(RocksDB { db });
@@ -91,7 +115,8 @@ mod tests {
 
         let _server = Server { 
             db: db.clone(),
-            fork_choice: fc.clone()
+            fork_choice: fc.clone(),
+            peer_id: local_peer_id,
         };
 
         let genesis = Block::genesis(); 

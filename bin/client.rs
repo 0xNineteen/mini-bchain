@@ -12,12 +12,14 @@ use tarpc::client::Config;
 use tarpc::context;
 use tarpc::tokio_serde::formats::Json;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::select;
 use tokio::time::interval;
 
+use tracing_subscriber::{EnvFilter, fmt};
 use tracing::{info, debug};
 
 use mini_bchain::structures::*;
@@ -25,23 +27,29 @@ use mini_bchain::network::*;
 
 #[tokio::main]
 pub async fn main() -> Result<()> { 
-    tracing_subscriber::fmt::init();
+    let filter = EnvFilter::try_from("INFO")?
+        .add_directive("tarpc::client=ERROR".parse()?);
+
+    fmt()
+        .with_env_filter(filter)
+        .init();
+
+    // rpc server address 
+    pub async fn get_rpc_client(port: u16) -> Result<RPCClient> { 
+        let server_addr = SocketAddr::from_str(&format!("[::1]:{}", port))?;
+        let transport = tarpc::serde_transport::tcp::connect(server_addr, Json::default);
+        let client = RPCClient::new(Config::default(), transport.await?).spawn();
+        Ok(client)
+    }
 
     // gossip sub for now ...
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
     info!("Local peer id: {local_peer_id}");
 
-    // let pubtime = rand::thread_rng().gen_range(5, 10);
-    // let pubtime = Duration::from_nanos(1);
     let pubtime = Duration::from_secs(5);
     let mut tick = interval(pubtime);
     info!("using pubtime {pubtime:?}");
-
-    // server address 
-    let server_addr = SocketAddr::from_str("[::1]:8888")?;
-    let transport = tarpc::serde_transport::tcp::connect(server_addr, Json::default);
-    let client = RPCClient::new(Config::default(), transport.await?).spawn();
 
     let tps_tick_seconds = 3;
     let mut tps_tick = interval(Duration::from_secs(tps_tick_seconds));
@@ -55,19 +63,35 @@ pub async fn main() -> Result<()> {
     let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
     let behaviour = ChainBehaviour { gossipsub, mdns };
 
-    // Set up an encrypted DNS-enabled TCP Transport over the Mplex protocol.
     let transport = libp2p::development_transport(local_key.clone()).await?;
     let mut swarm = Swarm::with_threadpool_executor(transport, behaviour, local_peer_id);
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
     let mut counter: u128 = 0;
 
+    let rpc_port_start = 8888;
+    let mut peers_2_rpc = HashMap::new();
+
     loop { 
         select! {
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(ChainBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
-                    for (peer_id, _multiaddr) in list {
+                    for (peer_id, _) in list {
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+
+                        // search peers to find corrresponding port
+                        let mut rpc_port = rpc_port_start; 
+                        loop { 
+                            let client = get_rpc_client(rpc_port).await?;
+                            let result = client.get_peer_id(context::current()).await;
+                            if let Ok(id) = result { 
+                                if id == peer_id { 
+                                    peers_2_rpc.insert(peer_id, client);
+                                    break;
+                                }
+                            }
+                            rpc_port += 1;
+                        }
                     }
                 },
                 _ => {}
@@ -76,9 +100,11 @@ pub async fn main() -> Result<()> {
                 info!("tps: {}", counter / tps_tick_seconds as u128);
                 counter = 0;
 
-                let hash = client.get_head(context::current()).await?.unwrap();
-                let block = client.get_block(context::current(), hash).await?;
-                info!("got block: {:x?}", block.unwrap().header.block_hash);
+                for (peer, client) in &peers_2_rpc { 
+                    let hash = client.get_head(context::current()).await?.unwrap();
+                    let block = client.get_block(context::current(), hash).await?;
+                    info!("peer: {peer:?} got block: {:x?}", block.unwrap().header.block_hash);
+                }
             },
             _ = tick.tick() => {
                 counter += 1;
