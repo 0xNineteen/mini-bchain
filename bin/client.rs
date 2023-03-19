@@ -1,6 +1,5 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use ed25519_dalek::Keypair;
-use mini_bchain::rpc::RPCClient;
 use rand::rngs::OsRng;
 
 use libp2p::futures::StreamExt;
@@ -8,13 +7,7 @@ use libp2p::gossipsub::Sha256Topic;
 use libp2p::{
     gossipsub, identity, mdns, swarm::SwarmEvent, PeerId, Swarm,
 };
-use tarpc::client::Config;
 use tarpc::context;
-use tarpc::tokio_serde::formats::Json;
-
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::str::FromStr;
 use std::time::Duration;
 use tokio::select;
 use tokio::time::interval;
@@ -24,6 +17,7 @@ use tracing::{info, debug};
 
 use mini_bchain::structures::*;
 use mini_bchain::network::*;
+use mini_bchain::rpc::*;
 
 #[tokio::main]
 pub async fn main() -> Result<()> { 
@@ -34,20 +28,12 @@ pub async fn main() -> Result<()> {
         .with_env_filter(filter)
         .init();
 
-    // rpc server address 
-    pub async fn get_rpc_client(port: u16) -> Result<RPCClient> { 
-        let server_addr = SocketAddr::from_str(&format!("[::1]:{}", port))?;
-        let transport = tarpc::serde_transport::tcp::connect(server_addr, Json::default);
-        let client = RPCClient::new(Config::default(), transport.await?).spawn();
-        Ok(client)
-    }
-
     // gossip sub for now ...
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
     info!("Local peer id: {local_peer_id}");
 
-    let pubtime = Duration::from_secs(5);
+    let pubtime = Duration::from_secs(3);
     let mut tick = interval(pubtime);
     info!("using pubtime {pubtime:?}");
 
@@ -69,8 +55,7 @@ pub async fn main() -> Result<()> {
 
     let mut counter: u128 = 0;
 
-    let rpc_port_start = 8888;
-    let mut peers_2_rpc = HashMap::new();
+    let mut peer_manager = PeerManager::default();
 
     loop { 
         select! {
@@ -78,20 +63,7 @@ pub async fn main() -> Result<()> {
                 SwarmEvent::Behaviour(ChainBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _) in list {
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-
-                        // search peers to find corrresponding port
-                        let mut rpc_port = rpc_port_start; 
-                        loop { 
-                            let client = get_rpc_client(rpc_port).await?;
-                            let result = client.get_peer_id(context::current()).await;
-                            if let Ok(id) = result { 
-                                if id == peer_id { 
-                                    peers_2_rpc.insert(peer_id, client);
-                                    break;
-                                }
-                            }
-                            rpc_port += 1;
-                        }
+                        peer_manager.add_peer(peer_id).await?;
                     }
                 },
                 _ => {}
@@ -100,7 +72,7 @@ pub async fn main() -> Result<()> {
                 info!("tps: {}", counter / tps_tick_seconds as u128);
                 counter = 0;
 
-                for (peer, client) in &peers_2_rpc { 
+                for (peer, client) in peer_manager.iter() { 
                     let hash = client.get_head(context::current()).await?.unwrap();
                     let block = client.get_block(context::current(), hash).await?;
                     info!("peer: {peer:?} got block: {:x?}", block.unwrap().header.block_hash);

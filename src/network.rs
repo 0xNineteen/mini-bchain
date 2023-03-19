@@ -11,6 +11,7 @@ use libp2p::{
     gossipsub, identity, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
 };
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use tarpc::context;
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -21,6 +22,7 @@ use crate::fork_choice::ForkChoice;
 use crate::machine::*;
 use crate::structures::*;
 
+use crate::rpc::*;
 use crate::db::*;
 use crate::get_pinned;
 
@@ -47,6 +49,7 @@ pub async fn network(
 ) -> Result<()> {
     // Create a random PeerId
     let local_peer_id = PeerId::from(local_key.public());
+    info!("Local peer id: {local_peer_id}");
 
     let mut gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
@@ -80,6 +83,8 @@ pub async fn network(
     let multi_addr = "/ip4/0.0.0.0/tcp/0".parse()?; 
     swarm.listen_on(multi_addr)?;
 
+    let mut peer_manager = PeerManager::default();
+
     loop {
         select! {
             Some(block) = producer_block_reciever.recv() => {
@@ -98,10 +103,12 @@ pub async fn network(
                 SwarmEvent::Behaviour(ChainBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        peer_manager.add_peer(peer_id).await?;
                     }
                 },
                 SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     message,
+                    propagation_source, 
                     ..
                  })) => {
                     let data = message.data.as_slice();
@@ -116,11 +123,42 @@ pub async fn network(
 
                     match bytemuck::try_from_bytes::<Block>(data) {
                         Ok(block) => {
-                            process_network_block(
-                                block, 
-                                db.clone(), 
-                                fork_choice.clone()
-                            ).await?;
+                            
+                            let mut blocks_to_commit = vec![
+                                *block
+                            ];
+
+                            while !blocks_to_commit.is_empty() { 
+                                let block = blocks_to_commit.pop().unwrap();
+
+                                let block_processing_result = process_network_block(
+                                    &block, 
+                                    db.clone(), 
+                                    fork_choice.clone()
+                                ).await;
+
+                                // do repair 
+                                if let Err(e) = block_processing_result { 
+
+                                    // todo: fix error checking 
+                                    let parent_hash = block.header.parent_hash;
+                                    let missing_parent = {
+                                        let fc = fork_choice.lock().await;
+                                        !fc.exists(parent_hash)
+                                    };
+
+                                    if missing_parent { 
+                                        info!("repairing missing parent block ...");
+                                        let client = peer_manager.get_peer(&propagation_source).unwrap();
+                                        // request missing parent block 
+                                        let block = client.get_block(context::current(), parent_hash).await?.unwrap();
+                                        blocks_to_commit.push(block);
+                                    } else { 
+                                        // if not missing parent then propogate it 
+                                        return Err(e);
+                                    }
+                                } 
+                            }
                         },
                         Err(_) => {
                             info!("serialization failed...");

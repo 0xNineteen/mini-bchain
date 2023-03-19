@@ -1,13 +1,16 @@
-use std::{sync::{Arc}, net::{IpAddr, Ipv6Addr}};
+use std::{sync::{Arc}, net::{IpAddr, Ipv6Addr, SocketAddr}, collections::{HashMap, hash_map::Iter}, str::FromStr};
 use libp2p::{PeerId, identity::{self, Keypair}};
 use tokio::sync::Mutex;
 
-use tarpc::{context::Context, tokio_serde::formats::Json, server::incoming::Incoming};
+use tarpc::{context::{Context, self}, tokio_serde::formats::Json, server::incoming::Incoming, client::Config};
 use tracing::info;
 
 use crate::{structures::{Sha256Bytes, Block}, db::{RocksDB}, fork_choice::ForkChoice};
 use tarpc::{server::{self, Channel}};
 use futures::{future, prelude::*};
+use anyhow::anyhow;
+
+const RPC_PORT_START: u128 = 8888;
 
 // todo: change to use bytemuck Codec (not json/serde)
 #[tarpc::service]
@@ -47,10 +50,10 @@ impl RPC for Server {
 pub async fn rpc(
     db: Arc<RocksDB>,
     fork_choice: Arc<Mutex<ForkChoice>>,
-    mut port: u16,
     keypair: Keypair,
 ) -> anyhow::Result<()> { 
     let local_peer_id = PeerId::from(keypair.public());
+    info!("Local peer id: {local_peer_id}");
 
     let _server = Server { 
         db,
@@ -58,9 +61,11 @@ pub async fn rpc(
         peer_id: local_peer_id
     };
 
+    // find available port
+    let mut port = RPC_PORT_START;
     let mut listener;
     loop { 
-        let server_addr = (IpAddr::V6(Ipv6Addr::LOCALHOST), port);
+        let server_addr = SocketAddr::from_str(&format!("[::1]:{}", port))?;
         listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await;
         if listener.is_ok() { 
             break; 
@@ -89,6 +94,61 @@ pub async fn rpc(
         .await;
 
     Ok(())
+}
+
+
+// rpc client stuff
+pub async fn get_rpc_client(port: u128, peer_id: PeerId) -> anyhow::Result<RPCClient> { 
+    let server_addr = SocketAddr::from_str(&format!("[::1]:{}", port))?;
+    let transport = tarpc::serde_transport::tcp::connect(server_addr, Json::default);
+    let client = RPCClient::new(Config::default(), transport.await?).spawn();
+
+    // verify it matches 
+    let result = client.get_peer_id(context::current()).await?;
+    if result == peer_id { 
+        Ok(client)
+    } else { 
+        Err(anyhow!("incorrect peer id"))
+    }
+}
+
+#[derive(Default)]
+pub struct PeerManager { 
+    pub map: HashMap<PeerId, RPCClient>
+}
+
+impl PeerManager { 
+    pub async fn add_peer(&mut self, peer_id: PeerId) -> anyhow::Result<()> { 
+        let mut rpc_port = RPC_PORT_START; 
+        loop { 
+            // since I run nodes on a single machien 
+            // we need RPCs to have different port numbers 
+            // so we brute force to figure out what port this peer is on 
+
+            let client = get_rpc_client(rpc_port, peer_id).await;
+            if let Ok(client) = client { 
+                info!("connected to {peer_id:?} on port {rpc_port:?}...");
+                self.map.insert(peer_id, client);
+                break;
+            }
+            rpc_port += 1;
+
+            if rpc_port > RPC_PORT_START + 10 { 
+                info!("peer id: {peer_id:?} rpc server port not found (likely client) ...");
+                return Ok(())
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn get_peer(&self, peer_id: &PeerId) -> Option<&RPCClient> { 
+        self.map.get(peer_id)
+    }
+
+    pub fn iter(&self) -> Iter<'_, PeerId, RPCClient> { 
+        self.map.iter()
+    }
 }
 
 

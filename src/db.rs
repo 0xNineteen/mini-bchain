@@ -52,7 +52,7 @@ impl RocksDB {
 
     // should use macro get_pinned!
     pub fn get_pinned(&self, key: Sha256Bytes) -> Result<DBPinnableSlice> {
-        let pinned_data = self.db.get_pinned(key)?.unwrap();
+        let pinned_data = self.db.get_pinned(key)?.ok_or(anyhow!("db get error: not found"))?;
         // cant do deserialization here :(
         Ok(pinned_data)
     }

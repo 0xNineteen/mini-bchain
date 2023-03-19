@@ -55,6 +55,10 @@ impl ForkChoice {
     pub fn get_head(&self) -> Option<Sha256Bytes> {
         self.heads.peek().cloned()
     }
+
+    pub fn exists(&self, block_hash: Sha256Bytes) -> bool { 
+        self.block_heights.get(&block_hash).map(|_| true).unwrap_or(false)
+    }
 }
 
 

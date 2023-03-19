@@ -26,9 +26,6 @@ pub fn main() -> Result<()> {
         .init();
 
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
-
-    let rpc_port_start = 8888;
-
     let keypair = identity::Keypair::generate_ed25519();
 
     // init db
@@ -72,7 +69,7 @@ pub fn main() -> Result<()> {
         let db_ = db.clone();
         let kp_ = keypair.clone();
         let h3 = tokio::spawn(async move { 
-            rpc(db_, fc_, rpc_port_start, kp_)
+            rpc(db_, fc_, kp_)
                 .instrument(tracing::info_span!("rpc"))
                 .await
                 .unwrap()
