@@ -43,3 +43,23 @@ a mini blockchain written in rust for learning purposes :)
     - on new tx: send to `BlockProducer` to save in mempool
     - on new block: send to `ForkChoice` to update chain/head
 
+## logging/metrics
+- influxdb + grafana 
+- solana-metrics 
+- `brew services start influxdb`
+  - setup on `http://localhost:8086`
+  - create a bucket (`tmp`) through UI 
+  - setup cli/http auth [https://docs.influxdata.com/influxdb/v2.4/tools/influx-cli/#set-up-the-influx-cli](https://docs.influxdata.com/influxdb/v2.4/tools/influx-cli/#set-up-the-influx-cli) with tmp bucket ID
+    - `influx v1 auth create --username username --password password --token $TOKEN --read-bucket $ID --write-bucket $ID`
+  - update `config.idb` 
+- `brew services start grafana`
+  - seutp a new datasource with influxdb + username password
+- to collect metrics use `SOLANA_METRICS_CONFIG=$(cat config.idb) cargo r`
+
+on shutdown 
+- `brew services stop influxdb`
+- `brew services stop grafana`
+
+### notes 
+- need to use depreceiated libp2p PeerID bc of solana-metrics dependency requirements
+

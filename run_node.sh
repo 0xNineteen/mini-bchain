@@ -1,0 +1,1 @@
+SOLANA_METRICS_CONFIG=$(cat config.idb) cargo run --bin node

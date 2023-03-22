@@ -1,0 +1,1 @@
+host=http://localhost:8086,db=tmp,u=username,p=password

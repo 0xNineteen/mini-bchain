@@ -1,5 +1,6 @@
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 use std::vec;
 use anyhow::{Result, anyhow};
 
@@ -11,11 +12,13 @@ use libp2p::{
     gossipsub, mdns, swarm::NetworkBehaviour, swarm::SwarmEvent, PeerId, Swarm,
 };
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use solana_metrics::datapoint_info;
 use tarpc::context;
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use tokio::time::interval;
 use tracing::info;
 
 use crate::fork_choice::ForkChoice;
@@ -76,8 +79,22 @@ pub async fn network(
 
     let mut peer_manager = PeerManager::default();
 
+    let metrics_tick_seconds = 1;
+    let mut n_peers = 0;
+    let mut txs_recieved = 0;
+    let mut blocks_recieved = 0;
+    let mut metrics_tick = interval(Duration::from_secs(metrics_tick_seconds));
+
     loop {
         select! {
+            _ = metrics_tick.tick() => { 
+                datapoint_info!(
+                    "network", 
+                    ("n_peers", n_peers, i64), 
+                    ("txs_recieved", txs_recieved, i64), 
+                    ("blocks_recieved", blocks_recieved, i64), 
+                );
+            },
             Some(block) = producer_block_reciever.recv() => {
                 info!("publishing block...");
 
@@ -95,6 +112,7 @@ pub async fn network(
                     for (peer_id, _multiaddr) in list {
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                         peer_manager.add_peer(peer_id).await?;
+                        n_peers += 1;
                     }
                 },
                 SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -105,6 +123,7 @@ pub async fn network(
                     let data = message.data.as_slice();
 
                     if let Ok(tx) = bytemuck::try_from_bytes::<SignedTransaction>(data) {
+                        txs_recieved += 1;
                         // send to mempool
                         if tx.verify().is_ok() { 
                             p2p_tx_sender.send(*tx)?; // clone :(
@@ -114,7 +133,8 @@ pub async fn network(
 
                     match bytemuck::try_from_bytes::<Block>(data) {
                         Ok(block) => {
-                            
+                            blocks_recieved += 1;
+
                             let mut blocks_to_commit = vec![
                                 *block
                             ];
