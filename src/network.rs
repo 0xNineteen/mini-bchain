@@ -88,6 +88,7 @@ pub async fn network(
     loop {
         select! {
             _ = metrics_tick.tick() => { 
+                // note difficult to get this to work easily since we run multiple nodes on a single machine
                 datapoint_info!(
                     "network", 
                     ("n_peers", n_peers, i64), 
