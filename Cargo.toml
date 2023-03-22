@@ -19,7 +19,8 @@ borsh = "0.10.2"
 bytemuck = { version = "1.13.1", features = ["derive"] }
 ed25519-dalek = "1.0.1"
 futures = "0.3.27"
-libp2p = { version = "0.51.0", features = ["full"] }
+libp2p = { version = "0.51.0", features = ["gossipsub", "macros", "identify", "mdns", "async-std", "serde", "tcp", "noise", "yamux", "mplex", "websocket", "dns"] }
+libp2p-identify = "0.42.1"
 paste = "1.0.12"
 rand = "0.7.0"
 rayon = "1.7.0"
@@ -27,6 +28,7 @@ rocksdb = "0.20.1"
 serde = "1.0.157"
 serde_bytes = "0.11.9"
 sha2 = "0.10.6"
+solana-metrics = "1.15.2"
 tarpc = { version = "0.31.0", features = ["full"] }
 tempfile = "3.4.0"
 tokio = { version = "1.26.0", features = ["full"] }

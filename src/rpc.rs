@@ -1,5 +1,5 @@
 use std::{sync::{Arc}, net::{SocketAddr}, str::FromStr};
-use libp2p::{PeerId};
+use libp2p::PeerId;
 use tokio::sync::Mutex;
 
 use tarpc::{context::{Context, self}, tokio_serde::formats::Json, client::Config};

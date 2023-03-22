@@ -28,7 +28,6 @@ pub async fn main() -> Result<()> {
         .with_env_filter(filter)
         .init();
 
-    // gossip sub for now ...
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
     info!("Local peer id: {local_peer_id}");
@@ -40,6 +39,7 @@ pub async fn main() -> Result<()> {
     let tps_tick_seconds = 3;
     let mut tps_tick = interval(Duration::from_secs(tps_tick_seconds));
 
+    // gossip sub for now ...
     let gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
         gossipsub::Config::default(),
