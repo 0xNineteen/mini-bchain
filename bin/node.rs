@@ -1,10 +1,13 @@
 use anyhow::Result;
+
 use libp2p::PeerId;
 use libp2p::identity;
 use mini_bchain::db::RocksDB;
+use mini_bchain::get_tmp_ledger_path_auto_delete;
 use mini_bchain::machine::ChainState;
+use mini_bchain::machine::HeadStatus;
 use mini_bchain::rpc::rpc;
-use rand::Rng;
+
 use rocksdb::DB;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
@@ -18,47 +21,47 @@ use tracing::{info, Instrument};
 use mini_bchain::network::*;
 use mini_bchain::pow::*;
 
-pub fn main() -> Result<()> {
-    let filter = EnvFilter::try_from("INFO")?
-        .add_directive("tarpc::client=ERROR".parse()?)
-        .add_directive("tarpc::server=ERROR".parse()?);
 
-    fmt()
-        .with_env_filter(filter)
-        .init();
+struct Node { 
+    state: ChainState
+}
 
-    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+impl Node { 
+    pub fn new() -> Self { 
+        // init p2p key
+        let keypair = identity::Keypair::generate_ed25519();
+        let peer_id = PeerId::from(keypair.public());
+        info!("Local peer id: {peer_id}");
 
-    // init p2p key
-    let keypair = identity::Keypair::generate_ed25519();
-    let peer_id = PeerId::from(keypair.public());
-    info!("Local peer id: {peer_id}");
+        // todo: consistent dirs + recoveries
+        let path = get_tmp_ledger_path_auto_delete!();
 
-    // init db
-    let id = rand::thread_rng().gen_range(0, 100);
-    let path = format!("./db/db_{id}/");
-    info!("using id: {id}");
+        let db = DB::open_default(path).unwrap();
+        let db = RocksDB { db };
+        let db = Arc::new(db);
 
-    let db = DB::open_default(path).unwrap();
-    let db = RocksDB { db };
-    let db = Arc::new(db);
+        // setup fork choice with genesis
+        let fork_choice = db.insert_genesis().unwrap();
+        let fork_choice = Arc::new(Mutex::new(fork_choice));
 
-    // setup fork choice with genesis
-    let fork_choice = db.insert_genesis().unwrap();
-    let fork_choice = Arc::new(Mutex::new(fork_choice));
+        let head_status = Arc::new(Mutex::new(HeadStatus::Behind));
 
-    let chain_state = ChainState { 
-        db, 
-        fork_choice, 
-        keypair
-    };
+        let chain_state = ChainState { 
+            db, 
+            fork_choice, 
+            keypair, 
+            head_status
+        };
 
-    runtime.block_on(async move {
+        Node { state: chain_state }
+    }
+
+    pub async fn start(&self) { 
         let (p2p_tx_sender, p2p_tx_reciever) = unbounded_channel(); // p2p => producer
         let (producer_block_sender, producer_block_reciever) = unbounded_channel(); // producer => p2p
 
         // begin
-        let state_ = chain_state.clone();
+        let state_ = self.state.clone();
         let h1 = tokio::spawn(async move {
             block_producer(p2p_tx_reciever, producer_block_sender, state_)
                 .instrument(tracing::info_span!("block producer"))
@@ -66,7 +69,7 @@ pub fn main() -> Result<()> {
                 .unwrap()
         });
 
-        let state_ = chain_state.clone();
+        let state_ = self.state.clone();
         let h2 = tokio::spawn(async move {
             network(p2p_tx_sender, producer_block_reciever, state_)
                 .instrument(tracing::info_span!("network"))
@@ -74,7 +77,7 @@ pub fn main() -> Result<()> {
                 .unwrap()
         });
 
-        let state_ = chain_state.clone();
+        let state_ = self.state.clone();
         let h3 = tokio::spawn(async move { 
             rpc(state_)
                 .instrument(tracing::info_span!("rpc"))
@@ -86,7 +89,23 @@ pub fn main() -> Result<()> {
         h3.await.unwrap();
         h1.await.unwrap();
         h2.await.unwrap();
-    });
+    }
+}
+
+pub fn main() -> Result<()> {
+    let filter = EnvFilter::try_from("INFO")?
+        // tarpc info! are too verbose 
+        .add_directive("tarpc::client=ERROR".parse()?)
+        .add_directive("tarpc::server=ERROR".parse()?);
+
+    fmt()
+        .with_env_filter(filter)
+        .init();
+
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    let node = Node::new();
+
+    runtime.block_on(node.start());
 
     Ok(())
 }

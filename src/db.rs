@@ -8,15 +8,17 @@ use anyhow::{Result, anyhow};
 
 use crate::{structures::*, fork_choice::ForkChoice};
 
+pub const VALIDATORS_ADDRESS: [u8; 32] = [0; 32];
+
 pub struct RocksDB { 
     pub db: DB
 }
 
 #[macro_export]
 macro_rules! get_pinned {
-    ($db:ident $hash:ident => $name:ident) => {
+    ($db:ident $hash:ident => $name:ident $t:ty) => {
         let $name = $db.get_pinned($hash)?; // cant deserialize in fcn so we use macro
-        let $name = bytemuck::from_bytes($name.deref()); // zero copy
+        let $name: &$t = bytemuck::from_bytes($name.deref()); // zero copy
     };
 }
 
@@ -27,7 +29,17 @@ impl RocksDB {
         let genesis_hash = genesis.header.block_hash;
         let fork_choice = ForkChoice::new(genesis_hash);
 
-        let account_digests = AccountDigests(vec![]);
+        let mut genesis_digests = vec![];
+
+        // init genesis accounts 
+        let validators = ValidatorsAccount { 
+            pubkeys: vec![]
+        };
+        let digest = self.put_vec(&validators)?;
+        genesis_digests.push((digest, VALIDATORS_ADDRESS));
+
+        // store the state root
+        let account_digests = AccountDigests(genesis_digests);
         let state_root = account_digests.digest();
         genesis.header.state_root = state_root;
         
@@ -133,7 +145,7 @@ mod tests {
         let _account = db.get(key)?;
         assert_eq!(account, _account);
 
-        get_pinned!(db key => pinned_account);
+        get_pinned!(db key => pinned_account Account);
         assert_eq!(account, *pinned_account);
 
         Ok(())

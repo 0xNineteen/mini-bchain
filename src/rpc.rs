@@ -54,7 +54,8 @@ pub async fn rpc(
     let ChainState {
         fork_choice, 
         db, 
-        keypair
+        keypair,
+        head_status: _,
     } = chain_state; 
 
     let local_peer_id = PeerId::from(keypair.public());

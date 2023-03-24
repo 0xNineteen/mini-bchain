@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::BinaryHeap;
 use anyhow::anyhow;
 use anyhow::Result;
+use solana_metrics::datapoint_info;
 use tracing::info;
 
 use crate::structures::*;
@@ -42,7 +43,12 @@ impl ForkChoice {
             self.heads.clear();
             self.head_height = block_height;
             self.heads.push(block_hash);
+
             info!("new head length: {block_height}!");
+            datapoint_info!(
+                "chain", 
+                ("height", block_height, i64), 
+            );
         } else if block_height == self.head_height {
             // another tie
             self.heads.push(block_hash);

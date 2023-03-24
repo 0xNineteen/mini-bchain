@@ -10,11 +10,19 @@ use crate::structures::*;
 use crate::fork_choice::ForkChoice;
 use crate::db::*;
 
+#[derive(Default, PartialEq, Eq, Clone)]
+pub enum HeadStatus { 
+    UpToDate(u32), 
+    #[default]
+    Behind
+}
+
 #[derive(Clone)]
 pub struct ChainState { 
     pub fork_choice: Arc<Mutex<ForkChoice>>, 
     pub db: Arc<RocksDB>, 
     pub keypair: Keypair,
+    pub head_status: Arc<Mutex<HeadStatus>>,
 }
 
 // todo: use hash tree lookup (eth full optimized)
@@ -72,6 +80,7 @@ pub fn state_transition(
         parent_hash: parent_block.header.block_hash,
         state_root,
         tx_root,
+        height: parent_block.header.height + 1,
         .. BlockHeader::default()
     };
 
@@ -92,7 +101,6 @@ pub async fn commit_new_block(
     db.put_vec(&account_digests)?;
     db.put(block)?;
 
-    // TODO: handle when parent hash not found (ie, request parent from reciever)
     let block_hash = block.header.block_hash;
     let parent_hash = block.header.parent_hash;
 
@@ -150,7 +158,7 @@ mod tests {
         assert_eq!(block_header.parent_hash, parent_block.header.block_hash);
         assert_eq!(block_header.state_root, account_digests.digest());
         assert_eq!(new_accounts.len(), 1);
-        assert_eq!(account_digests.0.len(), 1);
+        assert_eq!(account_digests.0.len(), 2);
 
         let account = new_accounts[0];
         assert_eq!(account.address, keypair.public.to_bytes());
@@ -168,7 +176,7 @@ mod tests {
 
         // digests in state 
         let digests: AccountDigests = db.get_vec(block_header.state_root)?;
-        let (account_digest, address) = digests.0[0];
+        let (account_digest, address) = digests.0[1];
         assert_eq!(address, keypair.public.to_bytes());
 
         let account: Account = db.get(account_digest)?;

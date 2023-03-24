@@ -43,6 +43,10 @@ a mini blockchain written in rust for learning purposes :)
     - on new tx: send to `BlockProducer` to save in mempool
     - on new block: send to `ForkChoice` to update chain/head
 
+## validator initialization 
+- `ValidatorsAccount`: keeps track of all the validators in the network
+
+
 ## logging/metrics
 - influxdb + grafana 
 - solana-metrics 

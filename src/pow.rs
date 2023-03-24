@@ -57,7 +57,7 @@ pub async fn block_producer(
         // sample N txs from mempool
         let txs = &mempool[..TXS_PER_BLOCK].try_into()?;
 
-        get_pinned!(db current_head => head_block);
+        get_pinned!(db current_head => head_block Block);
 
         // build potential block
         let (mut block_header, account_digests, new_accounts) =

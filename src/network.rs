@@ -51,7 +51,8 @@ pub async fn network(
     let ChainState {
         fork_choice, 
         db, 
-        keypair
+        keypair, 
+        head_status,
     } = chain_state; 
 
     let local_peer_id = PeerId::from(keypair.public());
@@ -95,6 +96,38 @@ pub async fn network(
                     ("txs_recieved", txs_recieved, i64), 
                     ("blocks_recieved", blocks_recieved, i64), 
                 );
+                
+                let status = head_status.lock().await.clone();
+
+                if status == HeadStatus::Behind { 
+                    // check if we're at the head
+                    let head_digest = fork_choice.lock().await.get_head().unwrap();
+                    let mut n_matching_heads = 0;
+                    for (_, client) in peer_manager.iter() {
+                        let peer_head_digest = client.get_head(context::current()).await?.unwrap();
+                        if peer_head_digest == head_digest { 
+                            n_matching_heads += 1;
+                        }
+                    }
+                    
+                    // note assumption is once up to date is shouldnt be behind
+                    if n_matching_heads >= n_peers / 2 { 
+                        info!("current head up to date: {n_matching_heads:?}/{n_peers:?}...");
+
+                        // get the validator ID from the account
+                        get_pinned!(db head_digest => head_block Block);
+                        let state_root = head_block.header.state_root;
+                        let account_digests = db.get_vec::<AccountDigests>(state_root)?.0;
+                        let index = account_digests.iter().position(|(_, addr)| *addr == VALIDATORS_ADDRESS).unwrap();
+                        let (account_digest, _) = account_digests[index];
+                        let validators = db.get_vec::<ValidatorsAccount>(account_digest)?;
+                        let n_validators = validators.pubkeys.len();
+
+                        let mut status = head_status.lock().await;
+                        *status = HeadStatus::UpToDate(n_validators as u32);
+                    }
+                }
+
             },
             Some(block) = producer_block_reciever.recv() => {
                 info!("publishing block...");
@@ -114,6 +147,13 @@ pub async fn network(
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                         peer_manager.add_peer(peer_id).await?;
                         n_peers += 1;
+                    }
+                },
+                SwarmEvent::Behaviour(ChainBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                    for (peer_id, _multiaddr) in list {
+                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                        peer_manager.remove_peer(&peer_id)?;
+                        n_peers -= 1;
                     }
                 },
                 SwarmEvent::Behaviour(ChainBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -160,6 +200,7 @@ pub async fn network(
                                     };
 
                                     if missing_parent { 
+                                        // todo: fix so we dont doss the first node on recovery
                                         info!("repairing missing parent block ...");
                                         let client = peer_manager.get_peer(&propagation_source).unwrap();
                                         // request missing parent block 
@@ -189,7 +230,7 @@ pub async fn process_network_block(
     fork_choice: Arc<Mutex<ForkChoice>>,
 ) -> Result<()> { 
     let parent_hash = block.header.parent_hash;
-    get_pinned!(db parent_hash => parent_block);
+    get_pinned!(db parent_hash => parent_block Block);
 
     // multithread sigverify
     let txs = &block.txs.0;

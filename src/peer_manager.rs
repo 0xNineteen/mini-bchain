@@ -34,6 +34,11 @@ impl PeerManager {
         Ok(())
     }
 
+    pub fn remove_peer(&mut self, peer_id: &PeerId) -> anyhow::Result<()> { 
+        self.map.remove(peer_id);
+        Ok(())
+    }
+
     pub fn get_peer(&self, peer_id: &PeerId) -> Option<&RPCClient> { 
         self.map.get(peer_id)
     }

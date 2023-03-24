@@ -67,6 +67,23 @@ impl ChainDigest for Account {
     }
 }
 
+
+// this contains all the validators on the network
+#[repr(C)]
+#[derive(BorshDeserialize, BorshSerialize, Default, Debug, PartialEq, Eq, Clone)]
+pub struct ValidatorsAccount {
+    pub pubkeys: Vec<Key256Bytes>,
+}
+
+impl ChainDigest for ValidatorsAccount {
+    fn digest(&self) -> Sha256Bytes {
+        let bytes = self.try_to_vec().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(bytes); // copy
+        hasher.finalize().as_slice().try_into().unwrap()
+    }
+}
+
 // [(digest, pubkey_bytes)]
 // cant impl Copy bc its a Vec and so cant impl Pod/zero-copy :(
 #[derive(BorshDeserialize, BorshSerialize, Clone)] 
@@ -167,6 +184,7 @@ pub struct BlockHeader {
     pub tx_root: Sha256Bytes,
     pub block_hash: Sha256Bytes,
     pub nonce: u128,
+    pub height: u128,
 }
 
 impl ChainDigest for BlockHeader { 
@@ -214,6 +232,7 @@ impl BlockHeader {
             parent_hash: [0; HASH_BYTE_SIZE],
             block_hash: [0; HASH_BYTE_SIZE],
             nonce: 0,
+            height: 0,
         };
         block.commit_block_hash();
         block
