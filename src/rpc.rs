@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use tarpc::{context::{Context, self}, tokio_serde::formats::Json, client::Config};
 use tracing::info;
 
-use crate::{structures::{Sha256Bytes, Block}, db::{RocksDB}, fork_choice::ForkChoice, machine::ChainState};
+use crate::{structures::{Sha256Bytes, Block, Transactions, BlockHeader}, db::{RocksDB}, fork_choice::ForkChoice, machine::ChainState};
 use tarpc::{server::{self, Channel}};
 use futures::{future, prelude::*};
 use anyhow::anyhow;
@@ -15,8 +15,9 @@ pub const RPC_PORT_START: u128 = 8888;
 // todo: change to use bytemuck Codec (not json/serde)
 #[tarpc::service]
 pub trait RPC { 
-    async fn get_block(hash: Sha256Bytes) -> Option<Block>;
+    async fn get_block_header(hash: Sha256Bytes) -> Option<BlockHeader>;
     async fn get_head() -> Option<Sha256Bytes>;
+    async fn get_txs(block_hash: Sha256Bytes) -> Option<Transactions>;
     // used to find localnodes
     async fn get_peer_id() -> PeerId;
 }
@@ -30,8 +31,12 @@ struct Server {
 
 #[tarpc::server]
 impl RPC for Server { 
-    async fn get_block(self, _: Context, block_hash: Sha256Bytes) -> Option<Block> { 
-        self.db.get(block_hash).map(Some).unwrap_or(None)
+    async fn get_block_header(self, _: Context, block_hash: Sha256Bytes) -> Option<BlockHeader> { 
+        self.db.get_pod(block_hash).map(Some).unwrap_or(None)
+    }
+
+    async fn get_txs(self, _: Context, tx_root: Sha256Bytes) -> Option<Transactions> { 
+        self.db.get_borsh(tx_root).map(Some).unwrap_or(None)
     }
 
     async fn get_head(self, _: Context) -> Option<Sha256Bytes> { 
@@ -54,11 +59,11 @@ pub async fn rpc(
     let ChainState {
         fork_choice, 
         db, 
-        keypair,
-        head_status: _,
+        p2p_keypair,
+        ..
     } = chain_state; 
 
-    let local_peer_id = PeerId::from(keypair.public());
+    let local_peer_id = PeerId::from(p2p_keypair.public());
 
     let _server = Server { 
         db,
@@ -152,17 +157,17 @@ mod tests {
         let client = RPCClient::new(Config::default(), client_transport).spawn();
         
         // block exists
-        let block = client.get_block(context::current(), genesis.header.block_hash).await?;
+        let block = client.get_block_header(context::current(), genesis.header.block_hash).await?;
         assert!(block.is_some());
         let rpc_block = block.unwrap(); 
-        assert_eq!(rpc_block.header.block_hash, genesis.header.block_hash);
+        assert_eq!(rpc_block.block_hash, genesis.header.block_hash);
 
         // block dne
         let mut new_block = Block::genesis();
         new_block.header.nonce = 10; 
         new_block.header.commit_block_hash();
 
-        let block = client.get_block(context::current(), new_block.header.block_hash).await?;
+        let block = client.get_block_header(context::current(), new_block.header.block_hash).await?;
         assert!(block.is_none());
 
         Ok(())

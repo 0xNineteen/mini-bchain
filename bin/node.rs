@@ -1,3 +1,4 @@
+use anyhow::Chain;
 use anyhow::Result;
 
 use libp2p::PeerId;
@@ -8,6 +9,8 @@ use mini_bchain::machine::ChainState;
 use mini_bchain::machine::HeadStatus;
 use mini_bchain::rpc::rpc;
 
+use ed25519_dalek::Keypair as EdKeypair;
+use rand::rngs::OsRng;
 use rocksdb::DB;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
@@ -33,6 +36,10 @@ impl Node {
         let peer_id = PeerId::from(keypair.public());
         info!("Local peer id: {peer_id}");
 
+        let mut rng = OsRng{};
+        let chain_keypair = EdKeypair::generate(&mut rng);
+        let chain_keypair = Arc::new(chain_keypair);
+
         // todo: consistent dirs + recoveries
         let path = get_tmp_ledger_path_auto_delete!();
 
@@ -49,7 +56,8 @@ impl Node {
         let chain_state = ChainState { 
             db, 
             fork_choice, 
-            keypair, 
+            p2p_keypair: keypair, 
+            chain_keypair,
             head_status
         };
 

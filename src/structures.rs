@@ -1,20 +1,21 @@
 use borsh::{BorshDeserialize, BorshSerialize};
-use ed25519_dalek::{Keypair, PublicKey, Signature, SignatureError};
+use ed25519_dalek::{Keypair, PublicKey, Signature};
 use ed25519_dalek::{Signer, Verifier};
 use sha2::{Digest, Sha256};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
-use bytemuck::{Pod, Zeroable, bytes_of};
+use bytemuck::{Pod, Zeroable};
 use serde::{Serialize, Deserialize, Deserializer}; 
 use serde_bytes;
+
+use crate::cast;
 
 pub const HASH_BYTE_SIZE: usize = 32;
 pub type Sha256Bytes = [u8; HASH_BYTE_SIZE];
 pub type Key256Bytes = [u8; 32]; // public/private key
 
-#[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Eq, Clone)]
 pub struct SignatureBytes([u8; Signature::BYTE_SIZE]);
 
 impl Serialize for SignatureBytes { 
@@ -37,11 +38,9 @@ impl<'de> Deserialize<'de> for SignatureBytes {
 }
 
 
-// pub const TXS_PER_BLOCK: usize = 2048; // todo: make this dynamic ? 
-pub const TXS_PER_BLOCK: usize = 2; // todo: make this dynamic ? 
+pub const TXS_PER_BLOCK: usize = 2;
 pub const POW_N_ZEROS: usize = 3; // note: needs to be > 0
 pub const POW_LEN_ZEROS: usize = POW_N_ZEROS - 1;
-
 
 // defines the Account, Transaction, and Block structures of the blockchain
 
@@ -51,31 +50,31 @@ pub trait ChainDigest {
 }
 
 /* ACCOUNT STRUCTS */
-#[repr(C)]
-#[derive(Pod, Zeroable, Copy, Default, Debug, PartialEq, Eq, Clone)]
-pub struct Account {
+#[derive(BorshDeserialize, BorshSerialize, Default, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct UserAccount {
     pub address: Key256Bytes,
     pub amount: u128,
 }
 
-impl ChainDigest for Account {
-    fn digest(&self) -> Sha256Bytes {
-        let bytes = bytemuck::bytes_of(self);
-        let mut hasher = Sha256::new();
-        hasher.update(bytes); // copy
-        hasher.finalize().as_slice().try_into().unwrap()
-    }
-}
-
-
 // this contains all the validators on the network
-#[repr(C)]
-#[derive(BorshDeserialize, BorshSerialize, Default, Debug, PartialEq, Eq, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Default, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct ValidatorsAccount {
     pub pubkeys: Vec<Key256Bytes>,
 }
 
-impl ChainDigest for ValidatorsAccount {
+#[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub enum Account { 
+    UserAccount(UserAccount), 
+    ValidatorsAccount(ValidatorsAccount)
+}
+
+impl Default for Account { 
+    fn default() -> Self {
+        Self::UserAccount(UserAccount::default())
+    }
+}
+
+impl ChainDigest for Account {
     fn digest(&self) -> Sha256Bytes {
         let bytes = self.try_to_vec().unwrap();
         let mut hasher = Sha256::new();
@@ -85,7 +84,6 @@ impl ChainDigest for ValidatorsAccount {
 }
 
 // [(digest, pubkey_bytes)]
-// cant impl Copy bc its a Vec and so cant impl Pod/zero-copy :(
 #[derive(BorshDeserialize, BorshSerialize, Clone)] 
 pub struct AccountDigests(pub Vec<(Sha256Bytes, Key256Bytes)>);
 
@@ -100,14 +98,122 @@ impl ChainDigest for AccountDigests {
 
 /* TRANSACTION STRUCTS */
 #[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
-pub struct Transaction {
-    pub address: Key256Bytes,
+#[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
+pub struct AccountTransaction {
+    pub pubkey: Key256Bytes,
     pub amount: u128,
 }
 
 #[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Eq, Clone, Default, Serialize, Deserialize)]
+pub struct AddValidatorTransaction {
+    pub pubkey: Key256Bytes,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub enum Transaction { 
+    AccountTransaction(AccountTransaction), 
+    AddValidatorTransaction(AddValidatorTransaction)
+}
+
+impl Default for Transaction { 
+    fn default() -> Self {
+        Self::AccountTransaction(AccountTransaction::default())
+    }
+}
+
+impl ChainDigest for Transaction {
+    fn digest(&self) -> Sha256Bytes {
+        let bytes = self.try_to_vec().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher.finalize().as_slice().try_into().unwrap()
+    }
+}
+
+use crate::db::VALIDATORS_ADDRESS;
+use crate::network::type_of;
+
+impl Transaction {
+    // consumes
+    pub fn sign(self, keypair: &Keypair) -> SignedTransaction {
+        let digest = self.digest();
+        let sig = keypair.sign(digest.as_slice());
+        let sig_bytes = sig.to_bytes();
+        SignedTransaction {
+            transaction: self,
+            signature: SignatureBytes(sig_bytes),
+        }
+    }
+
+    pub fn verify(&self) -> Result<()> { 
+        Ok(())
+    }
+
+    pub fn get_sender(&self) -> Result<PublicKey> { 
+        let pubkey_bytes = match self { 
+            Self::AddValidatorTransaction(tx) => &tx.pubkey, 
+            Self::AccountTransaction(tx) => &tx.pubkey
+        };
+        Ok(PublicKey::from_bytes(pubkey_bytes)?)
+    }
+
+    pub fn get_address(&self) -> Result<Key256Bytes> { 
+        let bytes = match self { 
+            Self::AddValidatorTransaction(_) => VALIDATORS_ADDRESS, 
+            Self::AccountTransaction(tx) => tx.pubkey
+        };
+        Ok(bytes)
+    }
+
+    pub fn process(&self, account: Option<Account>) -> Result<Account> {
+        //todo 
+        match self { 
+            Transaction::AccountTransaction(tx) => { 
+                if account.is_none() { 
+                    // new account
+                    Ok(Account::UserAccount(UserAccount { 
+                        address: tx.pubkey, 
+                        amount: tx.amount
+                    }))
+                } else { 
+                    // update account
+                    let account = account.unwrap();
+                    let mut account = cast!(account, Account::UserAccount);
+                    account.amount = tx.amount; 
+                    Ok(Account::UserAccount(account))
+                }
+            }, 
+
+            Transaction::AddValidatorTransaction(tx) => { 
+                let account = account.unwrap();
+                let mut account = cast!(account, Account::ValidatorsAccount);
+
+                // update account
+                if !account.pubkeys.contains(&tx.pubkey) { 
+                    account.pubkeys.push(tx.pubkey);
+                }
+
+                Ok(Account::ValidatorsAccount(account))
+            }
+        }
+    }
+}
+
+// each Transaction should be applied to a specific kind of account(s)
+    // ie, AddValidator => ValidatorsAccount 
+    // ie, Transfer => UserAccount
+
+// how to design this into the code? 
+    // what do we want? 
+        // address = transaction.get_account_address 
+        // account = lookup(address, state)
+        // account = transaction.process(account)
+        // state = store(account, state)
+
+
+#[repr(C)]
+#[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct SignedTransaction {
     pub transaction: Transaction,
     pub signature: SignatureBytes,
@@ -122,45 +228,26 @@ impl Default for SignedTransaction {
     }
 }
 
-
-impl ChainDigest for Transaction {
-    fn digest(&self) -> Sha256Bytes {
-        let bytes = bytes_of(self);
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        hasher.finalize().as_slice().try_into().unwrap()
-    }
-}
-
-impl Transaction {
-    // consumes
-    pub fn sign(self, keypair: &Keypair) -> SignedTransaction {
-        let digest = self.digest();
-        let sig = keypair.sign(digest.as_slice());
-        let sig_bytes = sig.to_bytes();
-        SignedTransaction {
-            transaction: self,
-            signature: SignatureBytes(sig_bytes),
-        }
-    }
-}
-
 impl SignedTransaction {
-    pub fn verify(&self) -> Result<(), SignatureError> {
+    pub fn verify(&self) -> anyhow::Result<()> { 
+        self.verify_signature()?;
+        self.transaction.verify()
+    }
+
+    pub fn verify_signature(&self) -> anyhow::Result<()> {
         let digest = self.transaction.digest();
-        let publickey = PublicKey::from_bytes(self.transaction.address.as_slice())?;
+        let publickey = self.transaction.get_sender()?;
         let sig = Signature::from_bytes(self.signature.0.as_slice())?;
-        publickey.verify(digest.as_slice(), &sig)
+        Ok(publickey.verify(digest.as_slice(), &sig)?)
     }
 }
 
-#[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, Clone, Serialize, Deserialize)]
-pub struct Transactions(pub [SignedTransaction; TXS_PER_BLOCK]);
+#[derive(BorshDeserialize, BorshSerialize, Debug, Clone, Serialize, Deserialize)]
+pub struct Transactions(pub Vec<SignedTransaction>);
 
 impl ChainDigest for Transactions {
     fn digest(&self) -> Sha256Bytes {
-        let bytes = bytemuck::bytes_of(self);
+        let bytes = self.try_to_vec().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(bytes); // copy
         hasher.finalize().as_slice().try_into().unwrap()
@@ -169,7 +256,7 @@ impl ChainDigest for Transactions {
 
 impl Default for Transactions { 
     fn default() -> Self {
-        Transactions([SignedTransaction::default(); TXS_PER_BLOCK])
+        Transactions(vec![])
     }
 }
 
@@ -194,21 +281,11 @@ impl ChainDigest for BlockHeader {
 }
 
 #[repr(C)]
-#[derive(Pod, Zeroable, Copy, Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
     pub txs: Transactions,
 }
-
-
-// impl Serialize for Block {  
-//     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-//         where
-//             S: serde::Serializer {
-        
-//     }
-// }
-
 
 impl Block {
     pub fn genesis() -> Self {
@@ -226,7 +303,7 @@ impl ChainDigest for Block {
 
 impl BlockHeader {
     pub fn genesis() -> Self {
-        let mut block = BlockHeader {
+        let block = BlockHeader {
             state_root: [0; HASH_BYTE_SIZE],
             tx_root: [0; HASH_BYTE_SIZE],
             parent_hash: [0; HASH_BYTE_SIZE],
@@ -234,7 +311,6 @@ impl BlockHeader {
             nonce: 0,
             height: 0,
         };
-        block.commit_block_hash();
         block
     }
 
@@ -265,11 +341,3 @@ impl BlockHeader {
         pow_success
     }
 }
-
-// #[cfg(test)] 
-// mod tests { 
-//     #[test]
-//     pub fn test_zero_copy() { 
-
-//     }
-// }

@@ -45,10 +45,10 @@ impl ForkChoice {
             self.heads.push(block_hash);
 
             info!("new head length: {block_height}!");
-            datapoint_info!(
-                "chain", 
-                ("height", block_height, i64), 
-            );
+            // datapoint_info!(
+            //     "chain", 
+            //     ("height", block_height, i64), 
+            // );
         } else if block_height == self.head_height {
             // another tie
             self.heads.push(block_hash);

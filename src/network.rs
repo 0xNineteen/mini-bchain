@@ -4,6 +4,7 @@ use std::time::Duration;
 use std::vec;
 use anyhow::{Result, anyhow};
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::Sha256Topic;
 
@@ -33,6 +34,21 @@ pub const TRANSACTION_TOPIC: &str = "transactions";
 pub const BLOCK_TOPIC: &str = "blocks";
 pub const GOSSIP_CORE_TOPICS: [&str; 2] = [TRANSACTION_TOPIC, BLOCK_TOPIC];
 
+pub fn type_of<T>(_: T) -> String {
+    format!("{}", std::any::type_name::<T>()).to_string()
+}
+
+
+#[macro_export]
+macro_rules! cast {
+    ($x:expr, $t:path) => {
+        match $x { 
+            $t(value) => value, 
+            _ => { panic!("cast to type {} failed ... actual {}", stringify!($t), type_of($x)) }
+        }
+    };
+}
+
 // todo: kalhmedia node lookup + non-local network
 // todo: improve blockpropogation -- solana's turbine/bittorrent
 #[derive(NetworkBehaviour)]
@@ -45,20 +61,21 @@ pub struct ChainBehaviour {
 // eg, use a shared (rwlock) enum Status::Failed(String)
 pub async fn network(
     p2p_tx_sender: UnboundedSender<SignedTransaction>,
-    mut producer_block_reciever: UnboundedReceiver<Block>,
+    mut producer_block_reciever: UnboundedReceiver<BlockHeader>,
     chain_state: ChainState, 
 ) -> Result<()> {
     let ChainState {
         fork_choice, 
         db, 
-        keypair, 
+        p2p_keypair, 
         head_status,
+        chain_keypair
     } = chain_state; 
 
-    let local_peer_id = PeerId::from(keypair.public());
+    let local_peer_id = PeerId::from(p2p_keypair.public());
 
     let mut gossipsub = gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(keypair.clone()),
+        gossipsub::MessageAuthenticity::Signed(p2p_keypair.clone()),
         gossipsub::Config::default(),
     )
     .unwrap();
@@ -72,7 +89,7 @@ pub async fn network(
     let behaviour = ChainBehaviour { gossipsub, mdns };
 
     // todo: use quicc
-    let transport = libp2p::development_transport(keypair.clone()).await?;
+    let transport = libp2p::development_transport(p2p_keypair.clone()).await?;
 
     let mut swarm = Swarm::with_threadpool_executor(transport, behaviour, local_peer_id);
     let multi_addr = "/ip4/0.0.0.0/tcp/0".parse()?; 
@@ -80,22 +97,23 @@ pub async fn network(
 
     let mut peer_manager = PeerManager::default();
 
-    let metrics_tick_seconds = 1;
+    let metrics_tick_seconds = 4;
     let mut n_peers = 0;
     let mut txs_recieved = 0;
     let mut blocks_recieved = 0;
     let mut metrics_tick = interval(Duration::from_secs(metrics_tick_seconds));
+    let _ = metrics_tick.tick().await; // scratch initial tick
 
     loop {
         select! {
             _ = metrics_tick.tick() => { 
                 // note difficult to get this to work easily since we run multiple nodes on a single machine
-                datapoint_info!(
-                    "network", 
-                    ("n_peers", n_peers, i64), 
-                    ("txs_recieved", txs_recieved, i64), 
-                    ("blocks_recieved", blocks_recieved, i64), 
-                );
+                // datapoint_info!(
+                //     "network", 
+                //     ("n_peers", n_peers, i64), 
+                //     ("txs_recieved", txs_recieved, i64), 
+                //     ("blocks_recieved", blocks_recieved, i64), 
+                // );
                 
                 let status = head_status.lock().await.clone();
 
@@ -111,23 +129,53 @@ pub async fn network(
                     }
                     
                     // note assumption is once up to date is shouldnt be behind
-                    if n_matching_heads >= n_peers / 2 { 
+                    let mut up_to_date_peers = n_peers / 2; 
+                    if n_peers % 2 != 0 { 
+                        up_to_date_peers += 1;
+                    }
+                    let is_up_to_date = n_matching_heads >= up_to_date_peers; 
+                    info!("current head up to date: {n_matching_heads:?}/{n_peers:?}/{up_to_date_peers:?}...");
+
+                    if is_up_to_date { 
                         info!("current head up to date: {n_matching_heads:?}/{n_peers:?}...");
 
                         // get the validator ID from the account
-                        get_pinned!(db head_digest => head_block Block);
-                        let state_root = head_block.header.state_root;
-                        let account_digests = db.get_vec::<AccountDigests>(state_root)?.0;
+                        get_pinned!(db head_digest => head_block BlockHeader);
+                        let state_root = head_block.state_root;
+                        let account_digests = db.get_borsh::<AccountDigests>(state_root)?.0;
                         let index = account_digests.iter().position(|(_, addr)| *addr == VALIDATORS_ADDRESS).unwrap();
                         let (account_digest, _) = account_digests[index];
-                        let validators = db.get_vec::<ValidatorsAccount>(account_digest)?;
-                        let n_validators = validators.pubkeys.len();
 
-                        let mut status = head_status.lock().await;
-                        *status = HeadStatus::UpToDate(n_validators as u32);
+                        let validators = cast!(
+                            db.get_borsh::<Account>(account_digest)?, 
+                            Account::ValidatorsAccount
+                        );
+                        let index = validators.pubkeys.iter().position(|addr| *addr == chain_keypair.public.to_bytes());
+
+                        if let Some(index) = index { 
+                            let mut status = head_status.lock().await;
+                            *status = HeadStatus::UpToDate(index as u32);
+                            info!("status: {status:?}");
+                        } else { 
+                            info!("broadcasting add validator to list...");
+
+                            // broadcast tx to add our pubkey to the network 
+                            let tx = Transaction::AddValidatorTransaction(AddValidatorTransaction { 
+                                pubkey: chain_keypair.public.to_bytes()
+                            });
+                            let tx = tx.sign(&chain_keypair);
+    
+                            let bytes = tx.try_to_vec()?;
+                            let _ = swarm.behaviour_mut()
+                                .gossipsub
+                                .publish(Sha256Topic::new(TRANSACTION_TOPIC), bytes);
+
+                            p2p_tx_sender.send(tx)?;
+                        }
+                    } else { 
+                        // TODO: run block repair from some client 
                     }
                 }
-
             },
             Some(block) = producer_block_reciever.recv() => {
                 info!("publishing block...");
@@ -163,25 +211,30 @@ pub async fn network(
                  })) => {
                     let data = message.data.as_slice();
 
-                    if let Ok(tx) = bytemuck::try_from_bytes::<SignedTransaction>(data) {
+                    if let Ok(tx) = SignedTransaction::try_from_slice(data) {
                         txs_recieved += 1;
                         // send to mempool
                         if tx.verify().is_ok() { 
-                            p2p_tx_sender.send(*tx)?; // clone :(
+                            p2p_tx_sender.send(tx)?; // clone :(
                         }
                         continue;
                     }
 
-                    match bytemuck::try_from_bytes::<Block>(data) {
-                        Ok(block) => {
+                    // todo: need to remove new block txs from the mempool
+                    match bytemuck::try_from_bytes::<BlockHeader>(data) {
+                        Ok(block_header) => {
                             blocks_recieved += 1;
 
                             let mut blocks_to_commit = vec![
-                                *block
+                                *block_header
                             ];
 
                             while !blocks_to_commit.is_empty() { 
-                                let block = blocks_to_commit.pop().unwrap();
+                                let header = blocks_to_commit.pop().unwrap();
+                                let client = peer_manager.get_peer(&propagation_source).unwrap();
+                                // request associated txs
+                                let txs = client.get_txs(context::current(), block_header.tx_root).await?.unwrap();
+                                let block = Block { header, txs };
 
                                 let block_processing_result = process_network_block(
                                     &block, 
@@ -201,10 +254,9 @@ pub async fn network(
 
                                     if missing_parent { 
                                         // todo: fix so we dont doss the first node on recovery
-                                        info!("repairing missing parent block ...");
-                                        let client = peer_manager.get_peer(&propagation_source).unwrap();
+                                        info!("repairing missing parent block: {parent_hash:x?}...");
                                         // request missing parent block 
-                                        let block = client.get_block(context::current(), parent_hash).await?.unwrap();
+                                        let block = client.get_block_header(context::current(), parent_hash).await?.unwrap();
                                         blocks_to_commit.push(block);
                                     } else { 
                                         // if not missing parent then propogate it 
@@ -224,13 +276,33 @@ pub async fn network(
     }
 }
 
+macro_rules! verify {
+    ($x:expr) => {
+        if !$x { 
+            return Err(anyhow!("block verification failed... {:?}", stringify!($x)));
+        } else { 
+            true
+        }
+    };
+    ($x:expr, $y:expr) => {
+        if !($x == $y) { 
+            return Err(anyhow!("block verification failed... {:?} (${:?} != {:?})", 
+                stringify!($x), 
+                $x, $y
+            ));
+        } else { 
+            true
+        }
+    };
+}
+
 pub async fn process_network_block(
     block: &Block, 
     db: Arc<RocksDB>, 
     fork_choice: Arc<Mutex<ForkChoice>>,
 ) -> Result<()> { 
     let parent_hash = block.header.parent_hash;
-    get_pinned!(db parent_hash => parent_block Block);
+    get_pinned!(db parent_hash => parent_block_header BlockHeader);
 
     // multithread sigverify
     let txs = &block.txs.0;
@@ -238,26 +310,24 @@ pub async fn process_network_block(
     if result.is_some() { 
         return Err(anyhow!("block tx sig verification failed..."));
     }
+    let txs = Transactions(txs.clone());
 
     // re-produce the state change
     let (
         mut block_header,
         account_digests,
         new_accounts
-    ) = state_transition(parent_block, txs, db.clone())?;
+    ) = state_transition(parent_block_header, &txs, db.clone())?;
     block_header.nonce = block.header.nonce;
     block_header.commit_block_hash();
 
     // verify final block
-    let verification = {
-        block_header.block_hash == block.header.block_hash &&
-        block_header.state_root == block.header.state_root &&
-        block_header.tx_root == block.header.tx_root &&
-        block_header.is_valid_pow()
+    {
+        verify!(block_header.block_hash, block.header.block_hash) &&
+        verify!(block_header.state_root, block.header.state_root) &&
+        verify!(block_header.tx_root, block.header.tx_root) &&
+        verify!(block_header.is_valid_pow())
     };
-    if !verification {
-        return Err(anyhow!("block verification failed..."));
-    }
     info!("block verification passed...");
 
     // store new block's state

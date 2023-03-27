@@ -1,4 +1,5 @@
 use anyhow::{Result};
+use borsh::BorshSerialize;
 use ed25519_dalek::Keypair;
 use rand::rngs::OsRng;
 
@@ -32,7 +33,7 @@ pub async fn main() -> Result<()> {
     let local_peer_id = PeerId::from(local_key.public());
     info!("Local peer id: {local_peer_id}");
 
-    let pubtime = Duration::from_secs(3);
+    let pubtime = Duration::from_secs(2);
     let mut tick = interval(pubtime);
     info!("using pubtime {pubtime:?}");
 
@@ -74,8 +75,8 @@ pub async fn main() -> Result<()> {
 
                 for (peer, client) in peer_manager.iter() { 
                     let hash = client.get_head(context::current()).await?.unwrap();
-                    let block = client.get_block(context::current(), hash).await?;
-                    info!("peer: {peer:?} got block: {:x?}", block.unwrap().header.block_hash);
+                    let block = client.get_block_header(context::current(), hash).await?;
+                    info!("peer: {peer:?} got block: {:x?}", block.unwrap().block_hash);
                 }
             },
             _ = tick.tick() => {
@@ -84,12 +85,12 @@ pub async fn main() -> Result<()> {
                 // todo: change into client with RPC (not gossip sub lol)
                 let mut rng = OsRng{};
                 let keypair = Keypair::generate(&mut rng);
-                let transaction = Transaction {
-                    address: keypair.public.to_bytes(),
+                let transaction = Transaction::AccountTransaction(AccountTransaction {
+                    pubkey: keypair.public.to_bytes(),
                     amount: 420
-                };
+                });
                 let transaction = transaction.sign(&keypair);
-                let bytes = bytemuck::bytes_of(&transaction);
+                let bytes = transaction.try_to_vec()?;
 
                 let result = swarm.behaviour_mut()
                     .gossipsub

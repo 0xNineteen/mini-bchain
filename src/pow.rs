@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{info, debug};
 
 use crate::structures::*;
 
@@ -17,7 +17,7 @@ use crate::get_pinned;
 // todo: include a state s.t if the network fails this auto-stops
 pub async fn block_producer(
     mut p2p_tx_reciever: UnboundedReceiver<SignedTransaction>,
-    p2p_block_sender: UnboundedSender<Block>,
+    p2p_block_sender: UnboundedSender<BlockHeader>,
     chain_state: ChainState, 
 ) -> Result<()> {
     let ChainState {
@@ -34,7 +34,7 @@ pub async fn block_producer(
         while let Ok(tx) = p2p_tx_reciever.try_recv() {
             // do some verification here
             // info!("new tx...");
-            if tx.verify().is_ok() {
+            if tx.verify().is_ok() && !mempool.contains(&tx) {
                 // info!("tx verification passed!");
                 mempool.push(tx);
             } else {
@@ -42,8 +42,8 @@ pub async fn block_producer(
             }
         }
 
-        if mempool.len() < TXS_PER_BLOCK {
-            info!(
+        if mempool.len() == 0 {
+            debug!(
                 "not enought txs ({} < {TXS_PER_BLOCK:?}), sleeping...",
                 mempool.len()
             );
@@ -55,13 +55,13 @@ pub async fn block_producer(
         info!("producing new block...");
 
         // sample N txs from mempool
-        let txs = &mempool[..TXS_PER_BLOCK].try_into()?;
-
-        get_pinned!(db current_head => head_block Block);
+        let n_txs = TXS_PER_BLOCK.min(mempool.len()); 
+        let txs = Transactions(mempool[..n_txs].to_vec());
+        get_pinned!(db current_head => head_block_header BlockHeader);
 
         // build potential block
         let (mut block_header, account_digests, new_accounts) =
-            state_transition(head_block, txs, db.clone())?;
+            state_transition(head_block_header, &txs, db.clone())?;
 
         info!("running POW loop...");
         // if success => { insert in DB + send to p2p to broadcast }
@@ -73,17 +73,16 @@ pub async fn block_producer(
                 info!("new POW block produced: {:x?}", block_header.block_hash);
 
                 // remove blocked txs from mempool
-                let txs = Transactions(*txs);
-                for _ in 0..TXS_PER_BLOCK {
+                for _ in 0..n_txs {
                     mempool.remove(0);
                 }
+
+                p2p_block_sender.send(block_header.clone())?;
 
                 let block = Block {
                     header: block_header,
                     txs,
                 };
-                p2p_block_sender.send(block)?;
-
                 // update state
                 commit_new_block(
                     &block,
