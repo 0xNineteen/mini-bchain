@@ -24,6 +24,7 @@ use tracing::info;
 
 use crate::fork_choice::ForkChoice;
 use crate::machine::*;
+use crate::rpc::RPCClient;
 use crate::structures::*;
 
 use crate::peer_manager::*;
@@ -48,6 +49,7 @@ macro_rules! cast {
         }
     };
 }
+
 
 // todo: kalhmedia node lookup + non-local network
 // todo: improve blockpropogation -- solana's turbine/bittorrent
@@ -97,6 +99,7 @@ pub async fn network(
 
     let mut peer_manager = PeerManager::default();
 
+
     let metrics_tick_seconds = 4;
     let mut n_peers = 0;
     let mut txs_recieved = 0;
@@ -121,10 +124,15 @@ pub async fn network(
                     // check if we're at the head
                     let head_digest = fork_choice.lock().await.get_head().unwrap();
                     let mut n_matching_heads = 0;
-                    for (_, client) in peer_manager.iter() {
+
+                    let mut digests = Vec::with_capacity(peer_manager.len());
+                    for (peer_id, client) in peer_manager.iter() {
                         let peer_head_digest = client.get_head(context::current()).await?.unwrap();
                         if peer_head_digest == head_digest { 
                             n_matching_heads += 1;
+                        } else { 
+                            // collect disagreement heads
+                            digests.push((peer_head_digest, peer_id))
                         }
                     }
                     
@@ -173,7 +181,11 @@ pub async fn network(
                             p2p_tx_sender.send(tx)?;
                         }
                     } else { 
-                        // TODO: run block repair from some client 
+                        // run block repair from some client 
+                        if let Some((header_digest, peer_id)) = digests.get(0) {
+                            let client = peer_manager.get_peer(peer_id).unwrap();
+                            request_chain_from_block_hash(header_digest, client, &db, &fork_choice).await?;
+                        }
                     }
                 }
             },
@@ -224,51 +236,15 @@ pub async fn network(
                     match bytemuck::try_from_bytes::<BlockHeader>(data) {
                         Ok(block_header) => {
                             blocks_recieved += 1;
-
-                            let mut blocks_to_commit = vec![
-                                *block_header
-                            ];
-
-                            while !blocks_to_commit.is_empty() { 
-                                let header = blocks_to_commit.pop().unwrap();
-                                let client = peer_manager.get_peer(&propagation_source).unwrap();
-                                // request associated txs
-                                let txs = client.get_txs(context::current(), block_header.tx_root).await?.unwrap();
-                                let block = Block { header, txs };
-
-                                let block_processing_result = process_network_block(
-                                    &block, 
-                                    db.clone(), 
-                                    fork_choice.clone()
-                                ).await;
-
-                                // do repair 
-                                if let Err(e) = block_processing_result { 
-
-                                    // todo: fix error checking 
-                                    let parent_hash = block.header.parent_hash;
-                                    let missing_parent = {
-                                        let fc = fork_choice.lock().await;
-                                        !fc.exists(parent_hash)
-                                    };
-
-                                    if missing_parent { 
-                                        // todo: fix so we dont doss the first node on recovery
-                                        info!("repairing missing parent block: {parent_hash:x?}...");
-                                        // request missing parent block 
-                                        let block = client.get_block_header(context::current(), parent_hash).await?.unwrap();
-                                        blocks_to_commit.push(block);
-                                    } else { 
-                                        // if not missing parent then propogate it 
-                                        return Err(e);
-                                    }
-                                } 
-                            }
+                            let client = peer_manager.get_peer(&propagation_source).unwrap();
+                            request_chain_from_header(&block_header, &client, &db, &fork_choice).await?;
                         },
                         Err(_) => {
                             info!("serialization failed...");
                         }
+
                     }
+
                 }
                 _ => { }
             }
@@ -322,6 +298,7 @@ pub async fn process_network_block(
     block_header.commit_block_hash();
 
     // verify final block
+    info!("verifying block: {:?}", block_header);
     {
         verify!(block_header.block_hash, block.header.block_hash) &&
         verify!(block_header.state_root, block.header.state_root) &&
@@ -337,4 +314,48 @@ pub async fn process_network_block(
     Ok(())
 }
 
+pub async fn request_chain_from_block_hash(block_hash: &Sha256Bytes, client: &RPCClient, db: &Arc<RocksDB>, fork_choice: &Arc<Mutex<ForkChoice>>) -> anyhow::Result<()> {
+    let block_header = client.get_block_header(context::current(), *block_hash).await?.unwrap();
+    request_chain_from_header(&block_header, client, db, fork_choice).await
+}
 
+pub async fn request_chain_from_header(block_header: &BlockHeader, client: &RPCClient, db: &Arc<RocksDB>, fork_choice: &Arc<Mutex<ForkChoice>>) -> anyhow::Result<()> {
+    let mut blocks_to_commit = vec![
+        *block_header
+    ];
+
+    while !blocks_to_commit.is_empty() { 
+        let header = blocks_to_commit.pop().unwrap();
+        // request associated txs
+        let txs = client.get_txs(context::current(), header.tx_root).await?.unwrap();
+        let block = Block { header, txs };
+
+        let block_processing_result = process_network_block(
+            &block, 
+            db.clone(), 
+            fork_choice.clone()
+        ).await;
+
+        // do repair 
+        if let Err(e) = block_processing_result { 
+            // todo: fix error checking 
+            let parent_hash = block.header.parent_hash;
+            let missing_parent = {
+                let fc = fork_choice.lock().await;
+                !fc.exists(parent_hash)
+            };
+
+            if missing_parent { 
+                // todo: fix so we dont doss the first node on recovery
+                info!("repairing missing parent block: {parent_hash:x?}...");
+                // request missing parent block 
+                let block = client.get_block_header(context::current(), parent_hash).await?.unwrap();
+                blocks_to_commit.push(block);
+            } else { 
+                // if not missing parent then propogate it 
+                return Err(e);
+            }
+        } 
+    }
+    Ok(())
+}

@@ -34,6 +34,10 @@ impl PeerManager {
         Ok(())
     }
 
+    pub fn len(&self) -> usize { 
+        self.map.len()
+    }
+
     pub fn remove_peer(&mut self, peer_id: &PeerId) -> anyhow::Result<()> { 
         self.map.remove(peer_id);
         Ok(())
