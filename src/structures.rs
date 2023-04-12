@@ -9,6 +9,8 @@ use bytemuck::{Pod, Zeroable};
 use serde::{Serialize, Deserialize, Deserializer}; 
 use serde_bytes;
 
+use crate::db::VALIDATORS_ADDRESS;
+use crate::network::type_of;
 use crate::cast;
 
 pub const HASH_BYTE_SIZE: usize = 32;
@@ -16,6 +18,7 @@ pub type Sha256Bytes = [u8; HASH_BYTE_SIZE];
 pub type Key256Bytes = [u8; 32]; // public/private key
 
 #[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq, Eq, Clone)]
+#[repr(transparent)]
 pub struct SignatureBytes([u8; Signature::BYTE_SIZE]);
 
 impl Serialize for SignatureBytes { 
@@ -50,6 +53,7 @@ pub trait ChainDigest {
 }
 
 /* ACCOUNT STRUCTS */
+// todo: account nonce so txs can only be valid once 
 #[derive(BorshDeserialize, BorshSerialize, Default, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct UserAccount {
     pub address: Key256Bytes,
@@ -131,8 +135,6 @@ impl ChainDigest for Transaction {
     }
 }
 
-use crate::db::VALIDATORS_ADDRESS;
-use crate::network::type_of;
 
 impl Transaction {
     // consumes

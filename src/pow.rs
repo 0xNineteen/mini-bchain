@@ -34,6 +34,7 @@ pub async fn block_producer(
         while let Ok(tx) = p2p_tx_reciever.try_recv() {
             // do some verification here
             // info!("new tx...");
+            // todo: use bloom filter instead of O(N) list search 
             if tx.verify().is_ok() && !mempool.contains(&tx) {
                 // info!("tx verification passed!");
                 mempool.push(tx);

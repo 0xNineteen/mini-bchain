@@ -99,7 +99,6 @@ pub async fn network(
 
     let mut peer_manager = PeerManager::default();
 
-
     let metrics_tick_seconds = 4;
     let mut n_peers = 0;
     let mut txs_recieved = 0;
